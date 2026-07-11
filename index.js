@@ -22,7 +22,60 @@ const chalk = require('chalk');
 const pino = require('pino');
 const { smsg } = require('./storage');
 
-const config = require('./config');
+let config;
+try {
+    config = require('./config');
+} catch (e) {
+    console.log(chalk.red('❌ Could not find config.js.'));
+    console.log(chalk.yellow('   Copy config.example.js to config.js, fill in your details, and try again.'));
+    process.exit(1);
+}
+
+function validateConfig(cfg) {
+    const problems = [];
+
+    if (!cfg.sessionId || cfg.sessionId === 'PASTE_YOUR_SESSION_ID_HERE') {
+        problems.push('sessionId is missing — pair on the site first and paste your session ID in config.js.');
+    }
+
+    if (!cfg.ownerName || cfg.ownerName === 'PASTE_YOUR_NAME_HERE') {
+        problems.push('ownerName is missing — add your name in config.js.');
+    }
+
+    if (!cfg.botName || typeof cfg.botName !== 'string' || !cfg.botName.trim()) {
+        problems.push('botName is missing or empty — give your bot a name in config.js.');
+    }
+
+    if (!cfg.prefix || typeof cfg.prefix !== 'string' || cfg.prefix.includes(' ') || cfg.prefix.length > 3) {
+        problems.push('prefix looks invalid — it should be a short symbol with no spaces, like "." or "!".');
+    }
+
+    if (typeof cfg.publicMode !== 'boolean') {
+        problems.push('publicMode should be true or false (no quotes) in config.js.');
+    }
+
+    if (cfg.sudoNumbers && !Array.isArray(cfg.sudoNumbers)) {
+        problems.push('sudoNumbers should be a list like ["234xxxxxxxxxx"], not a single value.');
+    } else if (Array.isArray(cfg.sudoNumbers)) {
+        for (const n of cfg.sudoNumbers) {
+            if (typeof n !== 'string' || !/^\d+$/.test(n)) {
+                problems.push(`sudoNumbers has an invalid entry: "${n}" — use digits only, no + or spaces.`);
+            }
+        }
+    }
+
+    return problems;
+}
+
+const configProblems = validateConfig(config);
+if (configProblems.length) {
+    console.log(chalk.red(`❌ Found ${configProblems.length} problem(s) in config.js:\n`));
+    configProblems.forEach((p, i) => console.log(chalk.yellow(`  ${i + 1}. ${p}`)));
+    console.log(chalk.yellow('\nFix these in config.js and run again.'));
+    process.exit(1);
+}
+
+console.log(chalk.green('✅ config.js looks good.'));
 
 // The base URL of LËGĒNDÃRY LAB™'s session API — do not change
 const API_BASE_URL = 'https://your-server-domain.com'; // <-- replace with your real server URL
