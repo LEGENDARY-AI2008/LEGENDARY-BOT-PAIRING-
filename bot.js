@@ -16,7 +16,8 @@ const {
     fetchLatestBaileysVersion,
     makeInMemoryStore,
     Browsers,
-    DisconnectReason
+    DisconnectReason,
+    jidDecode
 } = require('@boruto_vk7/baileys');
 const { Boom } = require('@hapi/boom');
 const chalk = require('chalk');
@@ -127,6 +128,18 @@ async function startBot() {
         browser: Browsers.macOS(config.botName),
         printQRInTerminal: false
     });
+
+    // case.js and storage.js call this as a method on the socket —
+    // normalizes device-suffixed JIDs (e.g. "1234:5@s.whatsapp.net")
+    // down to the bare JID ("1234@s.whatsapp.net").
+    sock.decodeJid = (jid) => {
+        if (!jid) return jid;
+        if (/:\d+@/.test(jid)) {
+            const decoded = jidDecode(jid) || {};
+            return (decoded.user && decoded.server && `${decoded.user}@${decoded.server}`) || jid;
+        }
+        return jid;
+    };
 
     global.botConfig = config;
     sock.public = config.workType === 'public';
