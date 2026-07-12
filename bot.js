@@ -63,7 +63,7 @@ if (problems.length) {
     process.exit(1);
 }
 
-const API_BASE_URL = process.env.API_BASE_URL || 'https://your-server-domain.com';
+const API_BASE_URL = process.env.API_BASE_URL || 'https://legendarybot.dpdns.org';
 const SESSION_DIR = path.join(__dirname, 'session');
 const store = makeInMemoryStore ? makeInMemoryStore({ logger: pino().child({ level: 'silent', stream: 'store' }) }) : null;
 

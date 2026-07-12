@@ -17,7 +17,7 @@ const config = {
 }
 // ========================================
 
-const API_BASE_URL = 'https://dragonish-flip-universal.ngrok-free.dev' // staging — update when live
+const API_BASE_URL = 'https://legendarybot.dpdns.org'
 const CORE_FILES = ['bot.js', 'case.js', 'storage.js']
 
 function printBanner() {
