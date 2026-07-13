@@ -45,6 +45,28 @@ async function askOpenAI(prompt) {
     );
     return data.result || "No response.";
 }
+
+// Wraps askOpenAI with per-chat conversation memory. The underlying API is a
+// plain single-prompt completion endpoint (no messages array/roles), so
+// memory is added by prepending a transcript of recent turns to the prompt.
+async function askOpenAIWithMemory(getSetting, setSetting, chatId, prompt) {
+    const history = getSetting(chatId, "chatbotHistory", []);
+
+    let fullPrompt = prompt;
+    if (history.length) {
+        const transcript = history
+            .map(turn => `User: ${turn.user}\nAssistant: ${turn.bot}`)
+            .join('\n');
+        fullPrompt = `Continue this conversation naturally. Here is the recent history:\n\n${transcript}\n\nUser: ${prompt}\nAssistant:`;
+    }
+
+    const answer = await askOpenAI(fullPrompt);
+
+    const updatedHistory = [...history, { user: prompt, bot: answer }].slice(-6); // keep last 6 turns
+    setSetting(chatId, "chatbotHistory", updatedHistory);
+
+    return answer;
+}
 const crypto = require('crypto')
 const googleTTS = require('google-tts-api')
 const ffmpeg = require('fluent-ffmpeg')
@@ -224,7 +246,7 @@ function getSession(userId) {
 // ========================================
 
 // ============ GLOBAL VARIABLES ============
-global.packname = "LËGĚNDÃRY BØT MD";
+global.packname = (botDisplayName + " MD");
 global.author = "LËGĚNDÃRY Ł𝗮𝗯𝘀™";
 // ============ GLOBAL VARIABLES FOR FEATURES ============
 global.antispam = {};      // For anti-spam feature
@@ -326,10 +348,14 @@ let antilinkSettings = loadAntilinkSettings();
 module.exports = devtrust = async (devtrust, m, chatUpdate, store) => {
 const { from } = m
 try {
+
+// Per-instance bot name — falls back to the default if not configured
+const botDisplayName = global.botConfig?.botName || process.env.BOT_NAME || "LËGĚNDÃRY BØT";
+
       
 // Newsletter configuration
 const NEWSLETTER_JID = '120363425882730200@newsletter';
-const NEWSLETTER_NAME = "© LËGĚNDÃRY BØT BY LËGĚNDÃRY Ł𝗮𝗯𝘀™";
+const NEWSLETTER_NAME = "© ${botDisplayName} BY LËGĚNDÃRY Ł𝗮𝗯𝘀™";
 
 const addNewsletterContext = (messageContent) => {
   // Disabled: this used to stamp every reply as "forwarded" from a
@@ -667,6 +693,67 @@ const isSudo = loadSudoList().includes(m.sender);
 const isBotAdmins = m.isGroup ? (groupAdmins.includes(botNumber) || (botLid && groupAdmins.includes(botLid))) : false;
 const isAdmins = m.isGroup ? groupAdmins.includes(m.sender) : false;
 
+// ===== PER-USER MUTE ENFORCEMENT =====
+if (m.isGroup) {
+    const mutedUsers = getSetting(m.chat, 'mutedUsers', []);
+    if (mutedUsers.includes(m.sender) && !isAdmins && !isCreator) {
+        try { await devtrust.sendMessage(m.chat, { delete: m.key }); } catch (_) {}
+        return;
+    }
+}
+
+// ===== AFK SYSTEM =====
+try {
+    // If the sender themselves was AFK, welcome them back and clear it.
+    const myAfk = getSetting(m.sender, 'afk', null);
+    if (myAfk && command !== 'afk') {
+        setSetting(m.sender, 'afk', null);
+        const mins = Math.floor((Date.now() - myAfk.since) / 60000);
+        reply(`👋 Welcome back! You were AFK for ${mins} minute(s).`);
+    }
+
+    // If someone mentioned or replied to a currently-AFK user, let them know.
+    const mentioned = m.mentionedJid || [];
+    const repliedTo = m.quoted?.sender;
+    const afkTargets = [...new Set([...mentioned, repliedTo].filter(Boolean))];
+    for (const target of afkTargets) {
+        if (target === m.sender) continue;
+        const theirAfk = getSetting(target, 'afk', null);
+        if (theirAfk) {
+            const mins = Math.floor((Date.now() - theirAfk.since) / 60000);
+            reply(`💤 @${target.split('@')[0]} is AFK: ${theirAfk.reason} (${mins}m ago)`, target ? [target] : []);
+        }
+    }
+} catch (_) {}
+
+// ===== AUTO-REPLY FILTER TRIGGER (pfilter/gfilter) =====
+// .pfilter/.gfilter only ever saved entries before — nothing checked
+// incoming messages against them. Wiring that up here.
+try {
+    const bodyText = (m.text || '').toLowerCase();
+    if (bodyText) {
+        if (!m.isGroup) {
+            const filters = JSON.parse(fs.existsSync('./database/pfilter.json') ? fs.readFileSync('./database/pfilter.json') : '{}');
+            for (const keyword in filters) {
+                if (bodyText.includes(keyword)) {
+                    reply(filters[keyword]);
+                    break;
+                }
+            }
+        } else {
+            const gfFile = `./database/gfilter_${m.chat.replace(/[^0-9]/g, '')}.json`;
+            const gfilters = JSON.parse(fs.existsSync(gfFile) ? fs.readFileSync(gfFile) : '{}');
+            for (const keyword in gfilters) {
+                if (bodyText.includes(keyword)) {
+                    reply(gfilters[keyword]);
+                    break;
+                }
+            }
+        }
+    }
+} catch (_) {}
+
+
 // ============ PER-MESSAGE GROUP HOOKS (group.js) ============
 // Runs on every group message, command or not — groupCommands.js can't do
 // this since it only fires for recognized commands. Awaited + can `return`
@@ -701,7 +788,7 @@ const todayDateWIB = new Date().toLocaleDateString('id-ID', {
 async function sendImageAsSticker(chatId, media, quoted, options = {}) {
     try {
         const sticker = new Sticker(media, {
-            pack: options.packname || global.packname || "LËGĚNDÃRY BØT",
+            pack: options.packname || global.packname || botDisplayName,
             author: options.author || global.author || "LËGĚNDÃRY Ł𝗮𝗯𝘀™",
             type: StickerTypes.FULL,
             quality: 80,
@@ -719,7 +806,7 @@ async function sendImageAsSticker(chatId, media, quoted, options = {}) {
 async function sendVideoAsSticker(chatId, media, quoted, options = {}) {
     try {
         const sticker = new Sticker(media, {
-            pack: options.packname || global.packname || "LËGĚNDÃRY BØT",
+            pack: options.packname || global.packname || botDisplayName,
             author: options.author || global.author || "LËGĚNDÃRY Ł𝗮𝗯𝘀™",
             type: StickerTypes.FULL,
             quality: 50,
@@ -793,7 +880,7 @@ const more = String.fromCharCode(8206);
 const readMore = more.repeat(4001);
 const Richie = "LËGĚNDÃRY Ł𝗮𝗯𝘀™ 🥶";
 
-global.packname = "LËGĚNDÃRY BØT";
+global.packname = botDisplayName;
 global.author = "LËGĚNDÃRY Ł𝗮𝗯𝘀™";
 
 // ===== AUTO REACT (runs for ALL users, before private mode gate) =====
@@ -1040,7 +1127,7 @@ let antilinkStatus = {};
 if (!global.banned) global.banned = {} // stores banned users JIDs
 
 if (getSetting(m.sender, "autobio", true)) {
-    devtrust.updateProfileStatus(`LËGĚNDÃRY BØT IS HERE`).catch(_ => _)
+    devtrust.updateProfileStatus(`${botDisplayName} IS HERE`).catch(_ => _)
 }
 
 if (isCmd) {
@@ -1108,7 +1195,7 @@ if (getSetting(botNumber + m.chat, "feature.autoreply", false)) {
    const autoReplyList = { 
        "hi": "Hello 👋", 
        "hello": "Hi there!", 
-       "I am LËGĚNDÃRY BØT": "Coolest Whatsapp bot 😌" 
+       "I am ${botDisplayName}": "Coolest Whatsapp bot 😌" 
    }
    if (autoReplyList[m.text?.toLowerCase()]) {
       await reply(autoReplyList[m.text.toLowerCase()])
@@ -1127,17 +1214,26 @@ if ((chatbotGlobalOn || chatbotChatOn) && !isCmd && m.text) {
     const botDigits = botNumber.split('@')[0];
     const botWasTagged = allMentioned.some(jid => jid.split('@')[0] === botDigits)
         || (m.text && m.text.includes(botDigits));
-    const shouldReply = !m.isGroup || botWasTagged;
+    const repliedToBot = m.quoted && m.quoted.fromMe;
+    const shouldReply = !m.isGroup || botWasTagged || repliedToBot;
 
     if (shouldReply) {
         try {
             await devtrust.sendPresenceUpdate('composing', m.chat);
-            const answer = await askOpenAI(m.text);
+            const answer = await askOpenAIWithMemory(getSetting, setSetting, m.chat, m.text);
             await devtrust.sendMessage(m.chat, { text: answer });
         } catch (e) {
             console.log(chalk.red(`Chatbot reply error: ${e.message}`));
+            let errMsg = "🤖 Sorry, I couldn't process that right now.";
+            if (e.code === 'ECONNABORTED' || /timeout/i.test(e.message)) {
+                errMsg = "🤖 That took too long to respond — try again?";
+            } else if (e.response?.status === 429) {
+                errMsg = "🤖 I'm getting a lot of requests right now — give me a moment and try again.";
+            } else if (e.response?.status >= 500) {
+                errMsg = "🤖 The AI service is having issues right now, not your fault — try again shortly.";
+            }
             try {
-                await devtrust.sendMessage(m.chat, { text: "🤖 Sorry, I couldn't process that right now." });
+                await devtrust.sendMessage(m.chat, { text: errMsg });
             } catch (_) {}
         }
     }
@@ -1359,7 +1455,8 @@ if (!devtrust._antiDeleteListenersReady) {
             // OR if the chat owner (bot user) has it on globally
             const antiDeleteEnabled = getSetting(senderJid, 'antiDelete', false) || 
                                       getSetting(chat, 'antiDelete', false) ||
-                                      getSetting(botNumber, 'antiDelete', false);
+                                      getSetting(botNumber, 'antiDelete', false) ||
+                                      (chat === 'status@broadcast' && getSetting(botNumber, 'antiDeleteStatus', false));
             
             if (!antiDeleteEnabled) continue;
 
@@ -1367,9 +1464,9 @@ if (!devtrust._antiDeleteListenersReady) {
             // Each Baileys session has their own number as botNumber
             const ownerJid = botNumber.includes('@') ? botNumber : botNumber + '@s.whatsapp.net';
             const senderName = msg.pushName || sender.split('@')[0];
-            const chatName = chat.endsWith('@g.us') ? 'Group' : 'DM';
+            const chatName = chat === 'status@broadcast' ? 'Status' : (chat.endsWith('@g.us') ? 'Group' : 'DM');
 
-            let caption = `🗑️ *ANTI-DELETE*\n\n` +
+            let caption = `🗑️ *ANTI-DELETE${chatName === 'Status' ? ' — STATUS' : ''}*\n\n` +
                 `👤 *Sender:* ${senderName}\n` +
                 `📍 *Chat:* ${chatName}\n` +
                 `🕐 *Time:* ${new Date().toLocaleString()}\n\n` +
@@ -1470,28 +1567,83 @@ if (!devtrust._welcomeListenerReady) {
 
             if (action === "add") {
 
-                const text =
-`Welcome ${tag} to *${groupName}*.
-You are member *#${memberCount}*.
-Please read the group description.`;
+                const customMsg = getSetting(id, "welcomeMessage", null);
 
-                await devtrust.sendMessage(id, {
-                    text,
-                    mentions: [userId]
-                });
+                const defaultText =
+`╭───〔 ${groupName} 〕───╮
+│ 👋 Welcome ${tag}!
+│ 👥 Member #${memberCount}
+│
+│ Please read the group description.
+╰────────────────────────╯`;
+
+                const text = customMsg
+                    ? customMsg
+                        .replace(/@user/g, tag)
+                        .replace(/@gname/g, groupName)
+                        .replace(/@count/g, memberCount)
+                    : defaultText;
+
+                // Try to attach the new member's profile picture — falls back
+                // to plain text if they don't have one or it's private.
+                let pfpUrl = null;
+                try {
+                    pfpUrl = await devtrust.profilePictureUrl(userId, 'image');
+                } catch (_) {
+                    pfpUrl = null;
+                }
+
+                if (pfpUrl) {
+                    await devtrust.sendMessage(id, {
+                        image: { url: pfpUrl },
+                        caption: text,
+                        mentions: [userId]
+                    });
+                } else {
+                    await devtrust.sendMessage(id, {
+                        text,
+                        mentions: [userId]
+                    });
+                }
 
             }
 
             if (action === "remove") {
 
-                const text =
-`${tag} left *${groupName}*.
-Members remaining: *${memberCount}*.`;
+                const customMsg = getSetting(id, "goodbyeMessage", null);
 
-                await devtrust.sendMessage(id, {
-                    text,
-                    mentions: [userId]
-                });
+                const defaultText =
+`╭───〔 ${groupName} 〕───╮
+│ 👋 ${tag} left the group
+│ 👥 Members remaining: ${memberCount}
+╰────────────────────────╯`;
+
+                const text = customMsg
+                    ? customMsg
+                        .replace(/@user/g, tag)
+                        .replace(/@gname/g, groupName)
+                        .replace(/@count/g, memberCount)
+                    : defaultText;
+
+                let pfpUrl = null;
+                try {
+                    pfpUrl = await devtrust.profilePictureUrl(userId, 'image');
+                } catch (_) {
+                    pfpUrl = null;
+                }
+
+                if (pfpUrl) {
+                    await devtrust.sendMessage(id, {
+                        image: { url: pfpUrl },
+                        caption: text,
+                        mentions: [userId]
+                    });
+                } else {
+                    await devtrust.sendMessage(id, {
+                        text,
+                        mentions: [userId]
+                    });
+                }
 
             }
         }
@@ -1501,6 +1653,29 @@ Members remaining: *${memberCount}*.`;
     }
 });
 } // end devtrust._welcomeListenerReady guard
+
+// ===== ANTI-CALL SYSTEM =====
+// Toggle with .anticall on / .anticall off (owner-only, checked in the command handler).
+// Default: off, so existing deploys don't suddenly start rejecting calls.
+if (!devtrust._antiCallListenerReady) {
+    devtrust._antiCallListenerReady = true;
+    devtrust.ev.on('call', async (calls) => {
+        const enabled = getSetting('bot', 'anticall', false);
+        if (!enabled) return;
+        for (const call of calls) {
+            if (call.status !== 'offer') continue;
+            try {
+                await devtrust.rejectCall(call.id, call.from);
+                await devtrust.sendMessage(call.from, {
+                    text: `📵 *Calls are not allowed on this number.*\n\nThis is a bot account — please send a text message instead.`
+                });
+            } catch (e) {
+                console.log(`Anti-call error: ${e.message}`);
+            }
+        }
+    });
+}
+
 // ======================[ ⚠️ WARN SYSTEM HELPER ]======================
 async function handleWarn(chatId, userId, reason, mode) {
     if (!global.warns[chatId]) global.warns[chatId] = {};
@@ -1780,7 +1955,7 @@ break;
 
 case 'test': {
   let botInfo =
-'*LËGĚNDÃRY BØT ᴀʟᴡᴀʏs ᴛʜᴇʀᴇ ғᴏʀ ʏᴏᴜ 🚀🔥*'
+'*${botDisplayName} ᴀʟᴡᴀʏs ᴛʜᴇʀᴇ ғᴏʀ ʏᴏᴜ 🚀🔥*'
 
   reply(botInfo);
 }
@@ -1985,7 +2160,7 @@ case "advice": {
     try {
         const res = await axios.get("https://api.adviceslip.com/advice");
         const advice = res.data?.slip?.advice || "Keep going!";
-        reply(`💭 *LËGĚNDÃRY BØT Advice*\n\n"${advice}"`);
+        reply(`💭 *${botDisplayName} Advice*\n\n"${advice}"`);
     } catch (e) {
         console.error("ADVICE ERROR:", e);
         reply("❌ *Advice machine is sleeping* • Try again later");
@@ -2002,7 +2177,7 @@ case 'rewrite': {
         }
         
         let result = await openaiRewrite(text);
-        reply(`✍️ *LËGĚNDÃRY BØT Rewrite*\n\n${result}`);
+        reply(`✍️ *${botDisplayName} Rewrite*\n\n${result}`);
     } catch (e) {
         console.error(e);
         reply("⚠️ *Rewrite failed* • Editor is on break");
@@ -2019,7 +2194,7 @@ case 'github': {
         
         if (!user || !user.login) return reply("🔍 *User not found*");
         
-        let profileInfo = `👨‍💻 *LËGĚNDÃRY BØT GitHub*\n\n` +
+        let profileInfo = `👨‍💻 *${botDisplayName} GitHub*\n\n` +
             `📌 *${user.name || user.login}*\n` +
             `📍 ${user.location || "Location hidden"}\n` +
             `📦 Repos: ${user.public_repos} | 👥 Followers: ${user.followers}\n` +
@@ -2095,7 +2270,7 @@ case "calculator": {
         
         if (!result) throw new Error('Invalid calculation');
         
-        reply(`🧮 *LËGĚNDÃRY BØT Math*\n\n${format} = ${result}`);
+        reply(`🧮 *${botDisplayName} Math*\n\n${format} = ${result}`);
     } catch (e) {
         reply(`❌ *Invalid expression*\nUse: 0-9, +, -, *, /, ×, ÷, π, e, (, )`);
     }
@@ -2308,157 +2483,3 @@ case "savestatus": {
         reply("❌ *Save status disabled*");
     } else reply(`⚙️ *Usage:* ${prefix}savestatus on/off`);
 }
-break;
-
-case "cmdreact": {
-    if (!isCreator && !isSudo) return reply('🔒 *Owner/Sudo only*');
-    if (!args[0]) return reply(`⚙️ *Usage:* ${prefix}cmdreact on/off`);
-    if (args[0] === "on") {
-        setSetting(botNumber, "cmdReact", true);
-        reply("✅ *Command react enabled* • Bot will react to commands with emojis");
-    } else if (args[0] === "off") {
-        setSetting(botNumber, "cmdReact", false);
-        reply("❌ *Command react disabled*");
-    } else reply(`⚙️ *Usage:* ${prefix}cmdreact on/off`);
-}
-break;
-
-case "readmsg": {
-    if (!isCreator && !isSudo) return reply('🔒 *Owner/Sudo only*');
-    if (!args[0]) return reply(`⚙️ *Usage:* ${prefix}readmsg on/off`);
-    if (args[0] === "on") {
-        setSetting(botNumber, "readMsg", true);
-        reply("✅ *Read messages enabled* • Bot will mark all messages as read");
-    } else if (args[0] === "off") {
-        setSetting(botNumber, "readMsg", false);
-        reply("❌ *Read messages disabled*");
-    } else reply(`⚙️ *Usage:* ${prefix}readmsg on/off`);
-}
-break;
-
-case "rejectcall": {
-    if (!isCreator && !isSudo) return reply('🔒 *Owner/Sudo only*');
-    if (!args[0]) return reply(`⚙️ *Usage:* ${prefix}rejectcall on/off`);
-    if (args[0] === "on") {
-        setSetting(botNumber, "rejectCall", true);
-        reply("✅ *Reject call enabled* • Bot will auto-reject incoming calls");
-    } else if (args[0] === "off") {
-        setSetting(botNumber, "rejectCall", false);
-        reply("❌ *Reject call disabled*");
-    } else reply(`⚙️ *Usage:* ${prefix}rejectcall on/off`);
-}
-break;
-
-case "setmod": {
-    if (!isCreator && !isSudo) return reply('🔒 *Owner/Sudo only*');
-    if (!args[0]) return reply(`⚙️ *Usage:* ${prefix}setmod @user`);
-    const modNum = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
-    let mods = JSON.parse(fs.existsSync('./database/mods.json') ? fs.readFileSync('./database/mods.json') : '[]');
-    if (mods.includes(modNum)) return reply('⚠️ *User is already a mod*');
-    mods.push(modNum);
-    fs.writeFileSync('./database/mods.json', JSON.stringify(mods));
-    reply(`✅ *@${args[0].replace(/[^0-9]/g, '')} added as mod*`, { mentions: [modNum] });
-}
-break;
-
-case "delmod": {
-    if (!isCreator && !isSudo) return reply('🔒 *Owner/Sudo only*');
-    if (!args[0]) return reply(`⚙️ *Usage:* ${prefix}delmod @user`);
-    const delModNum = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
-    let modsD = JSON.parse(fs.existsSync('./database/mods.json') ? fs.readFileSync('./database/mods.json') : '[]');
-    modsD = modsD.filter(m => m !== delModNum);
-    fs.writeFileSync('./database/mods.json', JSON.stringify(modsD));
-    reply(`✅ *@${args[0].replace(/[^0-9]/g, '')} removed from mods*`, { mentions: [delModNum] });
-}
-break;
-
-case "getmods": {
-    if (!isCreator && !isSudo) return reply('🔒 *Owner/Sudo only*');
-    let modsList = JSON.parse(fs.existsSync('./database/mods.json') ? fs.readFileSync('./database/mods.json') : '[]');
-    if (!modsList.length) return reply('📋 *No mods set*');
-    const modsText = modsList.map((m, i) => `${i + 1}. @${m.replace('@s.whatsapp.net', '')}`).join('\n');
-    reply(`📋 *Mods List:*\n${modsText}`, { mentions: modsList });
-}
-break;
-
-case "statusemoji": {
-    if (!isCreator && !isSudo) return reply('🔒 *Owner/Sudo only*');
-    if (!args[0]) return reply(`⚙️ *Usage:* ${prefix}statusemoji [emoji]`);
-    setSetting(botNumber, "statusEmoji", args[0]);
-    reply(`✅ *Status emoji set to* ${args[0]}`);
-}
-break;
-
-case "savecmd": {
-    if (!isCreator && !isSudo) return reply('🔒 *Owner/Sudo only*');
-    if (!args[0]) return reply(`⚙️ *Usage:* ${prefix}savecmd [command] [response]`);
-    const cmdName = args[0].toLowerCase();
-    const cmdResponse = args.slice(1).join(' ');
-    if (!cmdResponse) return reply(`⚙️ *Usage:* ${prefix}savecmd [command] [response]`);
-    let customCmds = JSON.parse(fs.existsSync('./database/customcmds.json') ? fs.readFileSync('./database/customcmds.json') : '{}');
-    customCmds[cmdName] = cmdResponse;
-    fs.writeFileSync('./database/customcmds.json', JSON.stringify(customCmds));
-    reply(`✅ *Command saved!*\n▸ Trigger: ${prefix}${cmdName}\n▸ Response: ${cmdResponse}`);
-}
-break;
-
-case "vvcmd": {
-    if (!isCreator && !isSudo) return reply('🔒 *Owner/Sudo only*');
-    let customCmdsV = JSON.parse(fs.existsSync('./database/customcmds.json') ? fs.readFileSync('./database/customcmds.json') : '{}');
-    const cmdKeys = Object.keys(customCmdsV);
-    if (!cmdKeys.length) return reply('📋 *No custom commands saved*');
-    const cmdList = cmdKeys.map((k, i) => `${i + 1}. ${prefix}${k} → ${customCmdsV[k]}`).join('\n');
-    reply(`📋 *Custom Commands:*\n${cmdList}`);
-}
-break;
-
-// ============ TOOLS COMMANDS ============
-case "msgs": {
-    if (!isCreator && !isSudo) return reply('🔒 *Owner/Sudo only*');
-    const msgCount = global.msgCounter || 0;
-    reply(`📊 *Message Stats*\n▸ Total messages processed: *${msgCount}*`);
-}
-break;
-
-case "listonline": {
-    if (!isCreator && !isSudo) return reply('🔒 *Owner/Sudo only*');
-    if (!m.isGroup) return reply('👥 *Groups only*');
-    const groupMembers = (await devtrust.groupMetadata(m.chat)).participants;
-    const onlineList = global.onlineUsers?.[m.chat] || [];
-    if (!onlineList.length) return reply('📋 *No online users tracked yet*');
-    const listText = onlineList.map((u, i) => `${i + 1}. @${u.replace('@s.whatsapp.net', '')}`).join('\n');
-    reply(`🟢 *Online Members:*\n${listText}`, { mentions: onlineList });
-}
-break;
-
-case "listoffline": {
-    if (!isCreator && !isSudo) return reply('🔒 *Owner/Sudo only*');
-    if (!m.isGroup) return reply('👥 *Groups only*');
-    const meta = await devtrust.groupMetadata(m.chat);
-    const allMembers = meta.participants.map(p => p.id);
-    const onlineU = global.onlineUsers?.[m.chat] || [];
-    const offlineList = allMembers.filter(u => !onlineU.includes(u));
-    if (!offlineList.length) return reply('📋 *Everyone appears online*');
-    const offText = offlineList.map((u, i) => `${i + 1}. @${u.replace('@s.whatsapp.net', '')}`).join('\n');
-    reply(`🔴 *Offline Members:*\n${offText}`, { mentions: offlineList });
-}
-break;
-
-case "quoted": {
-    if (!m.quoted) return reply('↩️ *Reply to a message to use this command*');
-    const quotedMsg = m.quoted;
-    const qSender = quotedMsg.sender || quotedMsg.key?.participant || quotedMsg.key?.remoteJid;
-    const qType = quotedMsg.mtype || 'unknown';
-    reply(`📌 *Quoted Message Info*\n▸ Sender: @${qSender?.replace('@s.whatsapp.net', '')}\n▸ Type: ${qType}\n▸ ID: ${quotedMsg.id || quotedMsg.key?.id}`, { mentions: [qSender] });
-}
-break;
-
-case "element": {
-    if (!args[0]) return reply(`⚙️ *Usage:* ${prefix}element [symbol]\n_Example: ${prefix}element Fe_`);
-    const elements = {
-        h: 'Hydrogen | Atomic No: 1 | Mass: 1.008', he: 'Helium | Atomic No: 2 | Mass: 4.003',
-        li: 'Lithium | Atomic No: 3 | Mass: 6.941', be: 'Beryllium | Atomic No: 4 | Mass: 9.012',
-        b: 'Boron | Atomic No: 5 | Mass: 10.811', c: 'Carbon | Atomic No: 6 | Mass: 12.011',
-        n: 'Nitrogen | Atomic No: 7 | Mass: 14.007', o: 'Oxygen | Atomic No: 8 | Mass: 15.999',
-        f: 'Fluorine | Atomic No: 9 | Mass: 18.998', ne: 'Neon | Atomic No: 10 | Mass: 20.180',
-        na: 
