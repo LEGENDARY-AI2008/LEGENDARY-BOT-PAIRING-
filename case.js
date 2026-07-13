@@ -246,7 +246,7 @@ function getSession(userId) {
 // ========================================
 
 // ============ GLOBAL VARIABLES ============
-global.packname = (botDisplayName + " MD");
+global.packname = (global.botConfig?.botName || process.env.BOT_NAME || "LËGĚNDÃRY BØT") + " MD";
 global.author = "LËGĚNDÃRY Ł𝗮𝗯𝘀™";
 // ============ GLOBAL VARIABLES FOR FEATURES ============
 global.antispam = {};      // For anti-spam feature
@@ -355,7 +355,7 @@ const botDisplayName = global.botConfig?.botName || process.env.BOT_NAME || "LË
       
 // Newsletter configuration
 const NEWSLETTER_JID = '120363425882730200@newsletter';
-const NEWSLETTER_NAME = "© ${botDisplayName} BY LËGĚNDÃRY Ł𝗮𝗯𝘀™";
+const NEWSLETTER_NAME = `© ${botDisplayName} BY LËGĚNDÃRY Ł𝗮𝗯𝘀™`;
 
 const addNewsletterContext = (messageContent) => {
   // Disabled: this used to stamp every reply as "forwarded" from a
@@ -2481,5 +2481,4 @@ case "savestatus": {
     } else if (args[0] === "off") {
         setSetting(botNumber, "saveStatus", false);
         reply("❌ *Save status disabled*");
-    } else reply(`⚙️ *Usage:* ${prefix}savestatus on/off`);
-}
+    } e
