@@ -154,6 +154,33 @@ async function startBot() {
             sendWelcomeMessage(sock).catch(e =>
                 console.log(chalk.red(`Welcome message error: ${e.message}`))
             );
+
+            // Group scheduler — checks every minute for groups due to
+            // auto-open/close based on .gcschedule settings saved via getSetting.
+            if (!sock._schedulerReady) {
+                sock._schedulerReady = true;
+                setInterval(async () => {
+                    try {
+                        const { getSetting, setSetting } = require('./setting/Settings.js');
+                        const now = new Date();
+                        const hhmm = now.toTimeString().slice(0, 5); // "HH:MM"
+                        const groups = await sock.groupFetchAllParticipating().catch(() => ({}));
+                        for (const gid of Object.keys(groups)) {
+                            const schedule = getSetting(gid, 'gcschedule', null);
+                            if (!schedule) continue;
+                            if (schedule.openTime === hhmm && schedule.lastAction !== 'open-' + hhmm) {
+                                await sock.groupSettingUpdate(gid, 'not_announcement').catch(() => {});
+                                setSetting(gid, 'gcschedule', { ...schedule, lastAction: 'open-' + hhmm });
+                            } else if (schedule.closeTime === hhmm && schedule.lastAction !== 'close-' + hhmm) {
+                                await sock.groupSettingUpdate(gid, 'announcement').catch(() => {});
+                                setSetting(gid, 'gcschedule', { ...schedule, lastAction: 'close-' + hhmm });
+                            }
+                        }
+                    } catch (e) {
+                        console.log(chalk.red(`Scheduler error: ${e.message}`));
+                    }
+                }, 60000);
+            }
         }
 
         if (connection === 'close') {
@@ -174,7 +201,6 @@ async function startBot() {
                 ? nexusboijid.message.ephemeralMessage.message
                 : nexusboijid.message;
 
-            if (!sock.public && !nexusboijid.key.fromMe && chatUpdate.type === 'notify') return;
             if (nexusboijid.key.id.startsWith('BAE5') && nexusboijid.key.id.length === 16) return;
 
             const m = smsg(sock, nexusboijid, store);
