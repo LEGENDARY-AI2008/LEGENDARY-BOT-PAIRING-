@@ -2893,7 +2893,7 @@ case "update": {
     if (!isCreator) return reply('🔒 *Owner only*');
 
     const API_BASE_URL = process.env.API_BASE_URL || "https://legendarybot.dpdns.org";
-    const filesToUpdate = ["case.js", "storage.js"];
+    const filesToUpdate = ["case.js", "storage.js", "bot.js"];
 
     await reply("🔄 *Checking for updates...*");
 
@@ -6293,7 +6293,7 @@ async function generateEphoto(effectUrl, text) {
 case 'plugin': {
     if (!isCreator) return reply('🔒 *Owner only*');
     const sub = (args[0] || '').toLowerCase();
-    const pluginManager = require(path.join(__dirname, '..', 'pluginManager.js'));
+    const pluginManager = require(path.join(__dirname, 'pluginManager.js'));
 
     if (sub === 'install') {
         const pluginId = args[1];
@@ -11650,7 +11650,7 @@ default:
     // The plugin never sees the real socket; we only act on its JSON reply.
     if (command) {
         try {
-            const pluginManager = require(path.join(__dirname, '..', 'pluginManager.js'));
+            const pluginManager = require(path.join(__dirname, 'pluginManager.js'));
             const installed = pluginManager.listPlugins(process.cwd());
             const match = Object.entries(installed).find(([, p]) => p.command === command.toLowerCase());
             if (match) {
