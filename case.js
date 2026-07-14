@@ -1058,13 +1058,13 @@ if (m.isGroup && !isAdmins && !isCreator) {
 if (m.isGroup && body && !isAdmins && !isCreator) {
     const config = getSetting(botNumber + m.chat, "antibot", { enabled: false, action: 'delete' });
     if (config.enabled) {
+        const botPrefixes = ['.', '!', '/', '#', '$', '%', '&', '*', '^', '~'];
         // Only flags a genuine unresolved device-suffix JID (e.g. "1234:5@s.whatsapp.net")
         // as bot-like — the old version used loose substring checks (.includes('bot'),
         // .includes('broadcast')) that could false-positive on real users, especially
         // @lid-format accounts, silently deleting their messages with zero reply.
         const rawJid = m.key?.participant || m.key?.remoteJid || '';
         const looksLikeBot = /:\d+@/.test(rawJid) || rawJid.endsWith('@broadcast');
-        const botPrefixes = ['.', '!', '/', '#', '$', '%', '&', '*', '^', '~'];
         if (botPrefixes.some(p => body.startsWith(p)) && looksLikeBot) {
             await antiAction(config.action, 'using bot commands', '🤖');
             return;
