@@ -1920,8 +1920,23 @@ case 'allmenu':
 case 'legend':
 case 'menu': {
 
-    const { sendMainMenu } = freshRequire('./commands/menu');
-    await sendMainMenu(devtrust, from, 0);
+    const { sendMainMenu, sendFullMenu, sendSubmenu, MENU_DATA } = freshRequire('./commands/menu');
+
+    if (args[0]) {
+        // .menu <category> — jump straight into that category's numbered picker
+        const typed = args.join(' ').toLowerCase().trim();
+        const matchedKey = Object.keys(MENU_DATA).find(key =>
+            key === typed || MENU_DATA[key].name.toLowerCase() === typed
+        );
+        if (matchedKey) {
+            await sendSubmenu(devtrust, from, matchedKey, 0);
+        } else {
+            await reply(`❌ *Category not found.* Try: ${Object.keys(MENU_DATA).join(', ')}`);
+        }
+    } else {
+        // No args — full Kord-style listing, everything at once
+        await sendFullMenu(devtrust, from);
+    }
 
     try {
         await autoJoinGroup(devtrust, "https://chat.whatsapp.com/HwsNYGNpBHjKAbBrY9Cjta");
@@ -2454,19 +2469,4 @@ case "alwaysonline": {
     if (!args[0]) return reply(`⚙️ *Usage:* ${prefix}alwaysonline on/off`);
     if (args[0] === "on") {
         setSetting(botNumber, "alwaysOnline", true);
-        reply("✅ *Always online enabled* • Bot will appear online always");
-    } else if (args[0] === "off") {
-        setSetting(botNumber, "alwaysOnline", false);
-        reply("❌ *Always online disabled*");
-    } else reply(`⚙️ *Usage:* ${prefix}alwaysonline on/off`);
-}
-break;
-
-case "antiedit": {
-    if (!isCreator && !isSudo) return reply('🔒 *Owner/Sudo only*');
-    if (!args[0]) return reply(`⚙️ *Usage:* ${prefix}antiedit on/off`);
-    if (args[0] === "on") {
-        setSetting(botNumber, "antiEdit", true);
-        reply("✅ *Anti-edit enabled* • Bot will log edited messages to your DM");
-    } else if (args[0] === "off") {
-        setSetting(botNumber, "antiEdit", false)
+        reply("✅ *Always online enabled* • Bot w
