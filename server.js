@@ -497,10 +497,17 @@ app.get('/api/suggestions', requireAdmin, (req, res) => {
 // ─── Serve latest bot files from the private GitHub repo (for .update command) ──
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN; // <-- set this as an env var on your panel, never hardcode
 const GITHUB_REPO = 'LEGENDARY-AI2008/LEGENDARY-BOT-PAIRING-'; // owner/repo
-const ALLOWED_UPDATE_FILES = ['case.js', 'storage.js', 'bot.js']; // whitelist — only these can be fetched
+const ALLOWED_UPDATE_FILES = [
+    'bot.js', 'case.js', 'storage.js',
+    'setting/config.js', 'allfunc/storage.js', 'allfunc/exif.js'
+]; // whitelist — only these can be fetched
 
-app.get('/api/update/:filename', async (req, res) => {
-    const { filename } = req.params;
+// NOTE: changed from '/api/update/:filename' to a wildcard route below,
+// because Express's single :param segment does not match slashes — so
+// nested paths like 'setting/config.js' would 404 before ever reaching
+// the whitelist check.
+app.get(/^\/api\/update\/(.+)$/, async (req, res) => {
+    const filename = req.params[0];
     const { sessionId } = req.query;
 
     if (!ALLOWED_UPDATE_FILES.includes(filename)) {
