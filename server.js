@@ -499,7 +499,7 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN; // <-- set this as an env var on 
 const GITHUB_REPO = 'LEGENDARY-AI2008/LEGENDARY-BOT-PAIRING-'; // owner/repo
 const ALLOWED_UPDATE_FILES = [
     'bot.js', 'case.js', 'storage.js',
-    'setting/config.js', 'allfunc/storage.js', 'allfunc/exif.js'
+    'setting/config.js', 'setting/Settings.js', 'allfunc/storage.js', 'allfunc/exif.js'
 ]; // whitelist — only these can be fetched
 
 // NOTE: changed from '/api/update/:filename' to a wildcard route below,
