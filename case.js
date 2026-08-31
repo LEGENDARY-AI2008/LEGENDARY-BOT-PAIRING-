@@ -1,14 +1,16 @@
 
 // Panel has no built-in Environment Variables tab, so config comes from
-// a .env file in this project's root instead — this loads it into
-// process.env before anything below reads from it. Wrapped in try/catch
-// so a missing dotenv package doesn't crash the whole bot.
-try { require('dotenv').config(); } catch (_) {}
+// config.env in this project's root instead (this bot's convention —
+// confirmed it already holds SESSION_ID/OWNER_NAME/BOT_NAME/etc). Loads
+// it into process.env before anything below reads from it. Wrapped in
+// try/catch so a missing dotenv package doesn't crash the whole bot.
+try { require('dotenv').config({ path: require('path').join(__dirname, 'config.env') }); } catch (_) {}
 
 require('./setting/config')
 const { 
   default: baileys, proto, jidNormalizedUser, generateWAMessage, 
-  generateWAMessageFromContent, getContentType, prepareWAMessageMedia 
+  generateWAMessageFromContent, getContentType, prepareWAMessageMedia,
+  getDevice: __baileys_getDevice
 } = require("@boruto_vk7/baileys");
 const { downloadMediaMessage } = require("@boruto_vk7/baileys");
 
@@ -704,7 +706,7 @@ const __cmd_menu = (function() {
     const chalk = require('chalk');
 const fs = require('fs');
 const path = require('path');
-const { proto, generateWAMessageFromContent, prepareWAMessageMedia, getDevice: __baileys_getDevice } = require('@boruto_vk7/baileys');
+const { proto, generateWAMessageFromContent, prepareWAMessageMedia } = require('@boruto_vk7/baileys');
 
 // ============ BRANDED BANNER ============
 const BANNER_PATH = path.join(__dirname, '..', 'media', 'legendary_banner.jpg');
