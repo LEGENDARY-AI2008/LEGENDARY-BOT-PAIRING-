@@ -1,4 +1,10 @@
 
+// Panel has no built-in Environment Variables tab, so config comes from
+// a .env file in this project's root instead — this loads it into
+// process.env before anything below reads from it. Wrapped in try/catch
+// so a missing dotenv package doesn't crash the whole bot.
+try { require('dotenv').config(); } catch (_) {}
+
 require('./setting/config')
 const { 
   default: baileys, proto, jidNormalizedUser, generateWAMessage, 
@@ -577,7 +583,7 @@ async function resolveImageUrlFromMessage(m, explicitText) {
     if (/image/.test(imgMimeSelf) || m.message?.imageMessage) imgSource = m;
     else if (/image/.test(imgMimeQuoted) || m.quoted?.message?.imageMessage) imgSource = m.quoted;
     if (!imgSource) return null;
-    const buffer = await imgSource.download();
+    const buffer = await downloadMediaMessage(imgSource, 'buffer', {});
     const form = new URLSearchParams();
     form.append('key', 'a1ea26a71427d4c251e84555155792ba');
     form.append('image', buffer.toString('base64'));
@@ -10939,7 +10945,7 @@ if (!devtrust._antiDeleteListenersReady) {
                 });
             } else if (mtype === 'imageMessage') {
                 try {
-                    const buffer = await devtrust.downloadMediaMessage(msg);
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
                     await devtrust.sendMessage(ownerJid, {
                         image: buffer,
                         caption: caption
@@ -10949,7 +10955,7 @@ if (!devtrust._antiDeleteListenersReady) {
                 }
             } else if (mtype === 'videoMessage') {
                 try {
-                    const buffer = await devtrust.downloadMediaMessage(msg);
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
                     await devtrust.sendMessage(ownerJid, {
                         video: buffer,
                         caption: caption
@@ -10959,7 +10965,7 @@ if (!devtrust._antiDeleteListenersReady) {
                 }
             } else if (mtype === 'audioMessage') {
                 try {
-                    const buffer = await devtrust.downloadMediaMessage(msg);
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
                     await devtrust.sendMessage(ownerJid, {
                         audio: buffer,
                         mimetype: 'audio/mpeg',
@@ -10970,7 +10976,7 @@ if (!devtrust._antiDeleteListenersReady) {
                 }
             } else if (mtype === 'stickerMessage') {
                 try {
-                    const buffer = await devtrust.downloadMediaMessage(msg);
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
                     await devtrust.sendMessage(ownerJid, { sticker: buffer });
                     await devtrust.sendMessage(ownerJid, { text: caption + '\n[Sticker above]' });
                 } catch {
@@ -12675,7 +12681,7 @@ case "update": {
     const GITHUB_OWNER = process.env.GITHUB_OWNER;
     const GITHUB_REPO = process.env.GITHUB_REPO;
     const GITHUB_BRANCH = process.env.GITHUB_BRANCH || 'main';
-    const filesToUpdate = ["case.js", "storage.js", "bot.js"];
+    const filesToUpdate = ["case.js"]; // only case.js, per instruction
 
     if (!GITHUB_OWNER || !GITHUB_REPO) {
         return reply(
@@ -12683,7 +12689,7 @@ case "update": {
             `\`GITHUB_OWNER\` = your GitHub username\n` +
             `\`GITHUB_REPO\` = repo name\n` +
             `\`GITHUB_BRANCH\` = branch (optional, defaults to \`main\`)\n\n` +
-            `Then push case.js/storage.js/bot.js to that repo and run ${prefix}update again.`
+            `Then push case.js to that repo and run ${prefix}update again.`
         );
     }
 
@@ -12967,7 +12973,7 @@ case 'tourl': {
 
     let media;
     try {
-        media = await q.download();
+        media = await downloadMediaMessage(q, 'buffer', {});
     } catch (error) {
         return reply('❌ *Download failed*');
     }
@@ -13103,7 +13109,7 @@ case "ptv": {
     try {
         reply('⏳ *Converting to PTV...*');
         const quoted = m.quoted || m;
-        const media = await quoted.download();
+        const media = await downloadMediaMessage(quoted, 'buffer', {});
         await devtrust.sendMessage(m.chat, {
             video: media,
             ptv: true,
@@ -13120,7 +13126,7 @@ case "togif": {
     try {
         reply('⏳ *Converting...*');
         const quoted = m.quoted || m;
-        const media = await quoted.download();
+        const media = await downloadMediaMessage(quoted, 'buffer', {});
         await devtrust.sendMessage(m.chat, {
             video: media,
             mimetype: 'video/mp4',
@@ -13137,7 +13143,7 @@ case "gif": {
         reply('⏳ *Converting to GIF sticker...*');
         const { Sticker, StickerTypes } = require('wa-sticker-formatter');
         const quoted = m.quoted || m;
-        const media = await quoted.download();
+        const media = await downloadMediaMessage(quoted, 'buffer', {});
         const sticker = new Sticker(media, {
             pack: global.packname || botDisplayName,
             author: global.author || 'LËGĚNDÃRY Ł𝗮𝗯𝘀™',
@@ -13158,7 +13164,7 @@ case "mp3": {
         reply('⏳ *Converting to MP3...*');
         const ffmpeg = require('fluent-ffmpeg');
         const quoted = m.quoted || m;
-        const media = await quoted.download();
+        const media = await downloadMediaMessage(quoted, 'buffer', {});
         const tmpIn = `./tmp/input_${Date.now()}.mp4`;
         const tmpOut = `./tmp/output_${Date.now()}.mp3`;
         fs.writeFileSync(tmpIn, media);
@@ -13214,7 +13220,7 @@ case "blackbg": {
         reply('⏳ *Adding black background...*');
         const sharp = require('sharp');
         const quoted = m.quoted || m;
-        const media = await quoted.download();
+        const media = await downloadMediaMessage(quoted, 'buffer', {});
         const result = await sharp(media)
             .flatten({ background: { r: 0, g: 0, b: 0 } })
             .png().toBuffer();
@@ -13230,7 +13236,7 @@ case "roundstk": {
         reply('⏳ *Making round sticker...*');
         const { Sticker, StickerTypes } = require('wa-sticker-formatter');
         const quoted = m.quoted || m;
-        const media = await quoted.download();
+        const media = await downloadMediaMessage(quoted, 'buffer', {});
         const sticker = new Sticker(media, {
             pack: global.packname || botDisplayName,
             author: global.author || 'LËGĚNDÃRY Ł𝗮𝗯𝘀™',
@@ -13249,7 +13255,7 @@ case "circlestk": {
         reply('⏳ *Making circle sticker...*');
         const sharp = require('sharp');
         const quoted = m.quoted || m;
-        const media = await quoted.download();
+        const media = await downloadMediaMessage(quoted, 'buffer', {});
         const { width, height } = await sharp(media).metadata();
         const size = Math.min(width, height);
         const circle = Buffer.from(`<svg><circle cx="${size/2}" cy="${size/2}" r="${size/2}"/></svg>`);
@@ -13274,7 +13280,7 @@ case "take": {
         return reply(`📥 *Take Sticker*\nReply to a sticker to save it: ${prefix}take`);
     try {
         const quoted = m.quoted || m;
-        const media = await quoted.download();
+        const media = await downloadMediaMessage(quoted, 'buffer', {});
         await devtrust.sendMessage(m.chat, {
             document: media,
             mimetype: 'image/webp',
@@ -13294,7 +13300,7 @@ case "exif": {
         const authorName = parts[1]?.trim() || global.author || 'LËGĚNDÃRY Ł𝗮𝗯𝘀™';
         const { Sticker, StickerTypes } = require('wa-sticker-formatter');
         const quoted = m.quoted || m;
-        const media = await quoted.download();
+        const media = await downloadMediaMessage(quoted, 'buffer', {});
         const sticker = new Sticker(media, {
             pack: packName,
             author: authorName,
@@ -13311,7 +13317,7 @@ case "doc": {
     if (!m.quoted) return reply(`📄 *Convert to Document*\nReply to any media: ${prefix}doc`);
     try {
         const quoted = m.quoted;
-        const media = await quoted.download();
+        const media = await downloadMediaMessage(quoted, 'buffer', {});
         const msgType = Object.keys(quoted.message || {})[0];
         const mimeMap = {
             imageMessage: { mime: 'image/jpeg', ext: 'jpg' },
@@ -13334,7 +13340,7 @@ case "tovv": {
         return reply(`👁️ *Convert to View Once Video*\nReply to a video: ${prefix}tovv`);
     try {
         const quoted = m.quoted || m;
-        const media = await quoted.download();
+        const media = await downloadMediaMessage(quoted, 'buffer', {});
         await devtrust.sendMessage(m.chat, {
             video: media,
             mimetype: 'video/mp4',
@@ -13345,29 +13351,29 @@ case "tovv": {
 break;
 
 // Audio effects using ffmpeg
-case "bass": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🎵 *Bass Boost*\nReply to audio: ${prefix}bass`); try { reply('⏳ *Applying bass boost...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await quoted.download(); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('bass=g=10').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+case "bass": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🎵 *Bass Boost*\nReply to audio: ${prefix}bass`); try { reply('⏳ *Applying bass boost...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('bass=g=10').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
 
-case "reverse": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage && !m.quoted?.message?.videoMessage) return reply(`🔄 *Reverse Audio*\nReply to audio/video: ${prefix}reverse`); try { reply('⏳ *Reversing...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await quoted.download(); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('areverse').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+case "reverse": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage && !m.quoted?.message?.videoMessage) return reply(`🔄 *Reverse Audio*\nReply to audio/video: ${prefix}reverse`); try { reply('⏳ *Reversing...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('areverse').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
 
-case "nightcore": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🌙 *Nightcore Effect*\nReply to audio: ${prefix}nightcore`); try { reply('⏳ *Applying nightcore...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await quoted.download(); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('asetrate=44100*1.25,atempo=1.06').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+case "nightcore": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🌙 *Nightcore Effect*\nReply to audio: ${prefix}nightcore`); try { reply('⏳ *Applying nightcore...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('asetrate=44100*1.25,atempo=1.06').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
 
-case "slow": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🐢 *Slow Audio*\nReply to audio: ${prefix}slow`); try { reply('⏳ *Slowing down...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await quoted.download(); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('atempo=0.7').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+case "slow": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🐢 *Slow Audio*\nReply to audio: ${prefix}slow`); try { reply('⏳ *Slowing down...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('atempo=0.7').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
 
-case "fast": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`⚡ *Fast Audio*\nReply to audio: ${prefix}fast`); try { reply('⏳ *Speeding up...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await quoted.download(); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('atempo=1.5').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+case "fast": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`⚡ *Fast Audio*\nReply to audio: ${prefix}fast`); try { reply('⏳ *Speeding up...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('atempo=1.5').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
 
-case "robot": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🤖 *Robot Voice*\nReply to audio: ${prefix}robot`); try { reply('⏳ *Applying robot effect...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await quoted.download(); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('afftfilt=real=hypot(re,im)*sin(0):imag=hypot(re,im)*cos(0):win_size=512:overlap=0.75').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+case "robot": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🤖 *Robot Voice*\nReply to audio: ${prefix}robot`); try { reply('⏳ *Applying robot effect...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('afftfilt=real=hypot(re,im)*sin(0):imag=hypot(re,im)*cos(0):win_size=512:overlap=0.75').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
 
-case "chipmunk": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🐿️ *Chipmunk Voice*\nReply to audio: ${prefix}chipmunk`); try { reply('⏳ *Applying chipmunk effect...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await quoted.download(); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('asetrate=44100*1.5,atempo=0.67').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+case "chipmunk": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🐿️ *Chipmunk Voice*\nReply to audio: ${prefix}chipmunk`); try { reply('⏳ *Applying chipmunk effect...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('asetrate=44100*1.5,atempo=0.67').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
 
 case "deep":
-case "fat": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🔈 *Deep Voice*\nReply to audio: ${prefix}deep`); try { reply('⏳ *Applying deep voice...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await quoted.download(); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('asetrate=44100*0.7,atempo=1.43').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+case "fat": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🔈 *Deep Voice*\nReply to audio: ${prefix}deep`); try { reply('⏳ *Applying deep voice...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('asetrate=44100*0.7,atempo=1.43').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
 
-case "echo": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🔊 *Echo Effect*\nReply to audio: ${prefix}echo`); try { reply('⏳ *Applying echo...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await quoted.download(); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('aecho=0.8:0.88:60:0.4').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+case "echo": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🔊 *Echo Effect*\nReply to audio: ${prefix}echo`); try { reply('⏳ *Applying echo...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('aecho=0.8:0.88:60:0.4').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
 
 case "blown":
-case "earrape": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`💥 *Earrape Effect*\nReply to audio: ${prefix}earrape`); try { reply('⏳ *Applying earrape...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await quoted.download(); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('volume=15').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+case "earrape": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`💥 *Earrape Effect*\nReply to audio: ${prefix}earrape`); try { reply('⏳ *Applying earrape...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('volume=15').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
 
-case "squirrel": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🐿️ *Squirrel Voice*\nReply to audio: ${prefix}squirrel`); try { reply('⏳ *Applying squirrel effect...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await quoted.download(); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('asetrate=44100*1.8,atempo=0.56').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+case "squirrel": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🐿️ *Squirrel Voice*\nReply to audio: ${prefix}squirrel`); try { reply('⏳ *Applying squirrel effect...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('asetrate=44100*1.8,atempo=0.56').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
 // ============ END CONVERTER COMMANDS ============
 
 // ============ SHAZAM / AUDIO IDENTIFY ============
@@ -13385,7 +13391,7 @@ case "identifyaudio": {
     }
     try {
         reply('🎶 *Listening...*');
-        const media = await shzQuoted.download();
+        const media = await downloadMediaMessage(shzQuoted, 'buffer', {});
         const tmpIn = `./tmp/shazam_in_${Date.now()}.mp3`;
         const tmpOut = `./tmp/shazam_out_${Date.now()}.mp3`;
         fs.writeFileSync(tmpIn, media);
@@ -13727,7 +13733,7 @@ case "imgbb": {
 
     let imgBase64 = null;
     if (imgSource) {
-        const imgBuffer = await imgSource.download();
+        const imgBuffer = await downloadMediaMessage(imgSource, 'buffer', {});
         imgBase64 = imgBuffer.toString('base64');
     } else if (text && isUrl(text.trim())) {
         const urlRes = await axios.get(text.trim(), { responseType: 'arraybuffer' });
@@ -14525,7 +14531,7 @@ case 'tomp4': {
     if (!/webp|gif/.test(mime)) return reply("⚠️ *Reply must be a sticker or gif*");
 
     try {
-        let media = await m.quoted.download();
+        let media = await downloadMediaMessage(m.quoted, 'buffer', {});
         let inputPath = `./tmp/${Date.now()}.${mime.includes('gif') ? 'gif' : 'webp'}`;
         let outputPath = `./tmp/${Date.now()}.mp4`;
         
@@ -14800,7 +14806,7 @@ case "readqr": {
     if (!m.quoted || !m.quoted.image) 
         return reply("📱 *Reply to a QR code image*");
     
-    const buffer = await m.quoted.download();
+    const buffer = await downloadMediaMessage(m.quoted, 'buffer', {});
     
     try {
         const res = await axios.post("https://api.qrserver.com/v1/read-qr-code/", buffer, {
@@ -16055,7 +16061,7 @@ case 'vvgh': {
     if (!m.quoted) return reply('📸 *Reply to a view-once media*');
 
     try {
-        const mediaBuffer = await m.quoted.download();
+        const mediaBuffer = await downloadMediaMessage(m.quoted, 'buffer', {});
         if (!mediaBuffer) return reply('❌ *Download failed*');
 
         // View-once messages arrive wrapped in a container type (e.g.
@@ -16131,7 +16137,7 @@ case 'readviewonce2': {
     try {
         await devtrust.sendMessage(m.chat, { react: { text: '👁️', key: m.key } });
         
-        let media = await m.quoted.download();
+        let media = await downloadMediaMessage(m.quoted, 'buffer', {});
         
         // Get bot's number - FIXED
         let botNumber = devtrust.user.id.split(':')[0] + '@s.whatsapp.net';
@@ -16654,7 +16660,7 @@ case '😭': {
     let mime = (m.quoted.msg || m.quoted).mimetype || '';
     
     try {
-        let media = await m.quoted.download();
+        let media = await downloadMediaMessage(m.quoted, 'buffer', {});
         let botNumber = devtrust.user.id.split(':')[0] + '@s.whatsapp.net';
         
         if (/image/.test(mime)) {
@@ -16798,7 +16804,7 @@ case 's': {
         
         // Image to sticker
         if (/image/.test(mime)) {
-            let media = await m.quoted.download();
+            let media = await downloadMediaMessage(m.quoted, 'buffer', {});
             await sendImageAsSticker(m.chat, media, m, { 
                 packname: global.packname || botDisplayName, 
                 author: global.author || "LËGĚNDÃRY Ł𝗮𝗯𝘀™" 
@@ -16808,7 +16814,7 @@ case 's': {
         // Video to animated sticker
         else if (/video/.test(mime)) {
             if (mediaType > 10) return reply('❌ *Video too long!* Max 10 seconds for stickers.');
-            let media = await m.quoted.download();
+            let media = await downloadMediaMessage(m.quoted, 'buffer', {});
             await sendVideoAsSticker(m.chat, media, m, {
                 packname: global.packname || botDisplayName,
                 author: global.author || "LËGĚNDÃRY Ł𝗮𝗯𝘀™"
@@ -17076,7 +17082,7 @@ case 'setpp': {
     if (!isCreator) return reply('🔒 *Owner only*');
     if (!quoted || !/image/.test(mime)) return reply(`🖼️ *Reply to an image with ${prefix}setpp*`);
     
-    let media = await quoted.download();
+    let media = await downloadMediaMessage(quoted, 'buffer', {});
     await devtrust.updateProfilePicture(botNumber, media);
     reply('✅ *Profile picture updated*');
 }
@@ -18874,7 +18880,7 @@ case "invert": {
     try {
         reply('⏳ *Inverting image...*');
         const quoted = m.quoted || m;
-        const media = await quoted.download();
+        const media = await downloadMediaMessage(quoted, 'buffer', {});
         const Jimp = require('jimp');
         const img = await Jimp.read(media);
         img.invert();
@@ -18898,7 +18904,7 @@ case "wanted": {
     if (!m.quoted?.message?.imageMessage && !m.message?.imageMessage) return reply(`🤠 *Wanted Poster*\nReply to an image: ${prefix}wanted`);
     try {
         const quoted = m.quoted || m;
-        const media = await quoted.download();
+        const media = await downloadMediaMessage(quoted, 'buffer', {});
         const b64 = media.toString('base64');
         const res = await axios.get(`https://api.popcat.xyz/wanted?image=data:image/jpeg;base64,${b64}`, { responseType: 'arraybuffer' });
         await devtrust.sendMessage(m.chat, { image: Buffer.from(res.data), caption: '🤠 *WANTED!*' }, { quoted: m });
@@ -18937,7 +18943,7 @@ case "rainbow": {
     if (!m.quoted?.message?.imageMessage && !m.message?.imageMessage) return reply(`🌈 *Rainbow Filter*\nReply to an image: ${prefix}rainbow`);
     try {
         const quoted = m.quoted || m;
-        const media = await quoted.download();
+        const media = await downloadMediaMessage(quoted, 'buffer', {});
         const Jimp = require('jimp');
         const img = await Jimp.read(media);
         const colors = [0xFF0000FF, 0xFF7F00FF, 0xFFFF00FF, 0x00FF00FF, 0x0000FFFF, 0x8B00FFFF];
@@ -19012,7 +19018,7 @@ case "compress": {
     try {
         reply('⏳ *Compressing...*');
         const quoted = m.quoted || m;
-        const media = await quoted.download();
+        const media = await downloadMediaMessage(quoted, 'buffer', {});
         const sharp = require('sharp');
         const compressed = await sharp(media).jpeg({ quality: 40 }).toBuffer();
         await devtrust.sendMessage(m.chat, { image: compressed, caption: `🗜️ *Compressed!*\nOriginal: ${(media.length / 1024).toFixed(1)}KB → Compressed: ${(compressed.length / 1024).toFixed(1)}KB` }, { quoted: m });
@@ -19455,7 +19461,7 @@ case "imagetext": {
     if (!ocrQuoted && !ocrDirect) return reply('Reply to an image to extract text');
     try {
         reply('⏳ Extracting text...');
-        const ocrMedia = await devtrust.downloadMediaMessage(ocrQuoted ? m.quoted : m);
+        const ocrMedia = await downloadMediaMessage(ocrQuoted ? m.quoted : m, 'buffer', {});
         const FormDataOCR = require('form-data');
         const formOCR = new FormDataOCR();
         formOCR.append('file', ocrMedia, { filename: 'img.png', contentType: 'image/png' });
@@ -21107,7 +21113,7 @@ case 'setgcpp': {
     }
     if (!m.quoted) return reply('✘ Reply to an image');
     try {
-        const gppMedia = await m.quoted.download();
+        const gppMedia = await downloadMediaMessage(m.quoted, 'buffer', {});
         await devtrust.updateProfilePicture(m.chat, gppMedia);
         reply('✓ Group profile picture updated');
     } catch (e) { reply('✘ ' + e.message); }
@@ -21414,7 +21420,7 @@ case 'setwelcomeimg': {
     const wImg = m.quoted?.mtype === 'imageMessage' ? m.quoted : (m.mtype === 'imageMessage' ? m : null);
     if (!wImg) return reply(`📸 Reply to (or send with) an image using ${prefix}setwelcomeimg to set it as the welcome image.`);
     try {
-        const buf = await wImg.download();
+        const buf = await downloadMediaMessage(wImg, 'buffer', {});
         const b64 = buf.toString('base64');
         setSetting(m.chat, 'welcomeImg', b64);
         reply('✓ Welcome image set');
@@ -21428,7 +21434,7 @@ case 'setgoodbyeimg': {
     const gImg = m.quoted?.mtype === 'imageMessage' ? m.quoted : (m.mtype === 'imageMessage' ? m : null);
     if (!gImg) return reply(`📸 Reply to (or send with) an image using ${prefix}setgoodbyeimg to set it as the goodbye image.`);
     try {
-        const buf = await gImg.download();
+        const buf = await downloadMediaMessage(gImg, 'buffer', {});
         const b64 = buf.toString('base64');
         setSetting(m.chat, 'goodbyeImg', b64);
         reply('✓ Goodbye image set');
@@ -22668,7 +22674,7 @@ case 'seticon': {
     const iconMsg = m.quoted ? m.quoted : m;
     if (!/image/.test(iconMsg.mtype || '')) return reply(`✘ Reply to an image with ${prefix}seticon`);
     try {
-        const iconBuffer = await iconMsg.download();
+        const iconBuffer = await downloadMediaMessage(iconMsg, 'buffer', {});
         const groupCmds = __cmd_group;
         await groupCmds.setGroupIcon(devtrust, m.chat, iconBuffer);
     } catch (e) { reply('✘ ' + e.message); }
@@ -23303,11 +23309,11 @@ case 'gstatus': {
     try {
         let messagePayload;
         if (quotedMsg && /image/.test(statusMime)) {
-            const statusMedia = await quotedMsg.download();
+            const statusMedia = await downloadMediaMessage(quotedMsg, 'buffer', {});
             const prepared = await prepareWAMessageMedia({ image: statusMedia, caption: text || '' }, { upload: devtrust.waUploadToServer });
             messagePayload = { groupStatusMessageV2: { message: { imageMessage: prepared.imageMessage } } };
         } else if (quotedMsg && /video/.test(statusMime)) {
-            const statusMedia = await quotedMsg.download();
+            const statusMedia = await downloadMediaMessage(quotedMsg, 'buffer', {});
             const prepared = await prepareWAMessageMedia({ video: statusMedia, caption: text || '' }, { upload: devtrust.waUploadToServer });
             messagePayload = { groupStatusMessageV2: { message: { videoMessage: prepared.videoMessage } } };
         } else if (text) {
