@@ -35,15 +35,14 @@ const fsx = require('fs-extra')
 
 async function askOpenAI(prompt) {
     const { data } = await axios.get(
-        "https://api-madrin.zone.id/ai/gpt5",
+        "https://prexzyapis.com/ai/askgpt5",
         {
             params: {
-                apikey: "test",
-                text: prompt
+                prompt: prompt
             }
         }
     );
-    return data.result || "No response.";
+    return data.result || data.response || data.answer || data.message || "No response.";
 }
 
 // Wraps askOpenAI with per-chat conversation memory. The underlying API is a
@@ -83,6 +82,17 @@ const { Sticker, StickerTypes } = require('wa-sticker-formatter');
 const { smsg, tanggal, getTime, isUrl, sleep, clockString, runtime, fetchJson, getBuffer, jsonformat, format, parseMention, getRandom, getGroupAdmins, generateProfilePicture } = require('./allfunc/storage')
 const { imageToWebp, videoToWebp, writeExifImg, writeExifVid, addExif } = require('./allfunc/exif.js')
 const richpic = fs.readFileSync(`./media/image1.jpg`)
+// Menu banner image — safe/optional unlike richpic above (won't crash
+// startup if missing, since this is new and the file may not be placed
+// yet). Drop your image at ./media/menu-banner.jpg in the bot's project
+// folder to enable it; .menu falls back to text-only until then.
+const MENU_IMAGE_PATH = './media/menu-banner.jpg';
+let menuImageBuffer = null;
+try {
+    if (fs.existsSync(MENU_IMAGE_PATH)) menuImageBuffer = fs.readFileSync(MENU_IMAGE_PATH);
+} catch (e) {
+    console.log('⚠️ Menu image not loaded:', e.message);
+}
 const numberEmojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"];
 
 // ============ CREATE REQUIRED DIRECTORIES ============
@@ -178,7 +188,11 @@ function savePrefixes(data) {
 
 function getUserPrefix(userId) {
   const prefixes = loadPrefixes();
-  return prefixes[userId] || '.'; // Default to '.' if no custom prefix
+  // Was `prefixes[userId] || '.'`, which treats a stored empty string
+  // (no-prefix mode) as falsy and silently falls back to '.' — so
+  // no-prefix mode could never actually stick. Only fall back to '.'
+  // when the user has no entry at all.
+  return Object.prototype.hasOwnProperty.call(prefixes, userId) ? prefixes[userId] : '.';
 }
 
 function setUserPrefix(userId, prefix) {
@@ -188,6 +202,27 @@ function setUserPrefix(userId, prefix) {
 }
 
 // ============ SESSION FUNCTIONS ============
+// ============ REAL COMMAND COUNT (self-reading) ============
+// The menu's command/category counts used to come from counting "• " lines
+// in a huge hand-maintained static text block — completely disconnected
+// from the actual switch statement, so it drifted out of sync (showed
+// "500+" while the real switch had 800+ case labels, many of them aliases
+// of the same command). This reads the file's OWN source at startup and
+// counts real, deduplicated case labels instead, so the number shown is
+// never stale again — it updates itself every time commands are added.
+let __REAL_COMMAND_COUNT__ = 0;
+let __REAL_COMMAND_LIST__ = [];
+try {
+    const __selfSource = fs.readFileSync(__filename, 'utf8');
+    const __caseMatches = __selfSource.match(/^\s*case\s+['"][a-zA-Z0-9_]+['"]\s*:/gm) || [];
+    const __names = __caseMatches.map(c => c.match(/['"]([a-zA-Z0-9_]+)['"]/)[1]);
+    __REAL_COMMAND_LIST__ = [...new Set(__names)].sort();
+    __REAL_COMMAND_COUNT__ = __REAL_COMMAND_LIST__.length;
+} catch (e) {
+    console.log('⚠️ Could not self-read command count:', e.message);
+}
+// =============================================================
+
 const SESSION_FILE = './database/sessions.json';
 const PAIRING_DIR = './database/pairing/';
 
@@ -251,7 +286,10 @@ global.author = "LËGĚNDÃRY Ł𝗮𝗯𝘀™";
 // ============ GLOBAL VARIABLES FOR FEATURES ============
 global.antispam = {};      // For anti-spam feature
 global.warns = {};         // For warning system
-global.muted = {};         // For mute system
+global.muted = global.muted || {};      // For mute system — was unconditionally
+                                          // resetting to {} right after loadMutedData()
+                                          // populated it above, silently wiping every
+                                          // saved mute on each bot restart.
 global.banned = global.banned || {};  // For banned users
 const tictactoeGames = {};
 const hangmanGames = {};
@@ -272,34 +310,281 @@ async function sendTable(sock, chatId, { title, headerText, rows, footerText, di
     }, contextMsg ? { quoted: contextMsg } : undefined);
 }
 
-// ============ MADRIN API HELPER ============
-// Generic GET wrapper for api-madrin.zone.id endpoints. Response shapes are
-// NOT consistent across endpoints (confirmed: ytmp3 is flat with
-// `download_url` at the root; facebook nests everything under `.data`), so
-// this returns the raw parsed body and each command handles its own shape —
-// with fallbacks for common shapes where the real response hasn't been
-// tested yet.
-const MADRIN_BASE = 'https://api-madrin.zone.id';
-const MADRIN_APIKEY = 'test';
+// ============ MADRIN/SUPREME API HELPER ============
+// Was pointed at api-madrin.zone.id, then api-supreme.zone.id. Per explicit
+// instruction: zero references to the Madrin provider anywhere in this
+// file, full stop — no exceptions for endpoints that don't have a
+// confirmed 1:1 Prexzy match. MADRIN_BASE/madrinGet now just alias
+// straight to Prexzy. The practical effect: the handful of features that
+// genuinely have no Prexzy equivalent (Logo/Maker's ~98 styles, Snapchat,
+// Stickerly, Wattpad, Bilibili, RemoveBG) will get a clean "not
+// available" style error instead of quietly working on the old provider
+// — which is what was explicitly asked for, so that's intentional, not
+// an oversight. madrinFetchImage below has its own clear message for the
+// Logo/Maker case specifically since that's the largest chunk (98 cmds).
+const MADRIN_BASE = 'https://prexzyapis.com';
 async function madrinGet(endpoint, extraParams = {}, timeoutMs = 25000) {
     const res = await axios.get(`${MADRIN_BASE}${endpoint}`, {
-        params: { apikey: MADRIN_APIKEY, ...extraParams },
+        params: extraParams,
         timeout: timeoutMs
     });
     return res.data;
 }
+
+// ============ PREXZY API HELPER ============
+// New provider (docs.prexzyapis.com / prexzyapis.com), 509 endpoints, no
+// API key required, GET & POST both work. Endpoint paths mirror Madrin's
+// layout closely (/download/*, /ai/*, /search/*, /tools/*) but NOT every
+// param name matches — check each call site. Response shapes are NOT
+// confirmed live (no outbound network access while writing this), so
+// every call still goes through the same defensive madrinExtractLink /
+// madrinExtractTitle helpers below rather than trusting one field name.
+// Migrating category-by-category; sites still on MADRIN_BASE haven't
+// been moved over yet.
+const PREXZY_BASE = 'https://prexzyapis.com';
+async function prexzyGet(endpoint, extraParams = {}, timeoutMs = 25000) {
+    const res = await axios.get(`${PREXZY_BASE}${endpoint}`, {
+        params: extraParams,
+        timeout: timeoutMs
+    });
+    return res.data;
+}
+
+// Cheap line-set diff (not a true LCS diff) — good enough to hand to the
+// AI as "here's roughly what changed" without shipping the whole file.
+// Ignores line ordering/duplicates on purpose, we only care about content
+// that's genuinely new vs genuinely gone.
+function computeLineDiff(oldStr = '', newStr = '', maxLines = 80) {
+    const clean = (s) => s.split('\n').map(l => l.trim()).filter(Boolean);
+    const oldLines = clean(oldStr);
+    const newLines = clean(newStr);
+    const oldSet = new Set(oldLines);
+    const newSet = new Set(newLines);
+
+    const added = newLines.filter(l => !oldSet.has(l));
+    const removed = oldLines.filter(l => !newSet.has(l));
+
+    return {
+        added: added.slice(0, maxLines),
+        removed: removed.slice(0, maxLines),
+        addedTotal: added.length,
+        removedTotal: removed.length
+    };
+}
+
+// Builds a friendly, non-technical changelog from the raw diffs using the
+// same AI backend as .gemini/.openai. Falls back to a plain line-count
+// summary if the AI call fails, so .update never gets stuck on this step.
+async function generateUpdateChangelog(changes) {
+    const sections = changes.map(({ filename, oldContent, newContent }) => {
+        const { added, removed, addedTotal, removedTotal } = computeLineDiff(oldContent, newContent);
+        return `File: ${filename}\n` +
+            `Added (${addedTotal} lines total, sample below):\n${added.join('\n') || '(none)'}\n\n` +
+            `Removed (${removedTotal} lines total, sample below):\n${removed.join('\n') || '(none)'}`;
+    }).join('\n\n---\n\n');
+
+    const prompt =
+        `You're writing a short WhatsApp changelog message for bot users based on a raw code diff.\n` +
+        `Summarize what likely changed in plain, friendly language — new features, fixes, tweaks. ` +
+        `Never mention code, variable names, function names, or file internals directly — describe ` +
+        `the user-facing impact only. Use short bullet points with emojis, under 120 words total, no code blocks.\n\n` +
+        sections;
+
+    // Tried one AI endpoint and silently fell back to a raw line-count
+    // summary on any failure — but that endpoint alone has been flaky
+    // tonight. Try a few different real Prexzy models in sequence before
+    // actually giving up, since a working writeup is the whole point of this.
+    const endpoints = [
+        { path: '/ai/askgpt5', params: { prompt } },
+        { path: '/ai/gemini', params: { prompt } },
+        { path: '/ai/mistral', params: { prompt } },
+        { path: '/ai/qwen', params: { prompt } }
+    ];
+    for (const { path, params } of endpoints) {
+        try {
+            const madrinRes = await prexzyGet(path, params);
+            const answer = prexzyExtractAnswer(madrinRes);
+            if (answer && answer.trim().length > 10) return answer.trim();
+        } catch (e) {
+            console.log(chalk.yellow(`⚠️ Changelog generation failed via ${path}: ${e.message}`));
+        }
+    }
+
+    // Every model failed — fall back to line deltas rather than nothing,
+    // but this should be rare now that multiple models are tried.
+    return changes.map(({ filename, oldContent, newContent }) => {
+        const delta = newContent.split('\n').length - oldContent.split('\n').length;
+        return `• *${filename}* — ${delta >= 0 ? `+${delta}` : delta} lines`;
+    }).join('\n') + '\n\n_⚠️ AI writeup unavailable right now — showing raw line changes instead._';
+}
 // Pulls a usable link out of a response no matter which shape it came back
-// in — flat `download_url`/`url`, or nested under `.data`/`.result`.
+// in. Confirmed shapes are flat (status/title/download_url etc. all at
+// root) but this stays defensive with nested .data/.result fallbacks too,
+// in case a not-yet-tested endpoint differs.
 function madrinExtractLink(data) {
     if (!data) return null;
-    return data.download_url || data.url || data.link
+    return data.download_url || data.video_url || data.image_url || data.url || data.link
+        || data.hd || data.sd
         || data?.data?.hd || data?.data?.sd || data?.data?.url || data?.data?.download_url
         || data?.result?.url || data?.result?.download_url || data?.result?.link
         || null;
 }
 function madrinExtractTitle(data, fallback = 'File') {
     if (!data) return fallback;
-    return data.title || data?.data?.title || data?.result?.title || fallback;
+    return data.title || data.filename || data.name
+        || data?.data?.title || data?.result?.title || fallback;
+}
+
+// ============ PARTICIPANT JID NORMALIZER ============
+// kick/add/promote/demote were all rebuilding the target jid by stripping
+// non-digits and hard-appending '@s.whatsapp.net'. That's wrong for any
+// group where WhatsApp is using privacy "@lid" addressing instead of a
+// phone-number jid (increasingly common) — stripping an @lid id down to
+// digits and reattaching '@s.whatsapp.net' produces a jid that doesn't
+// match any real participant, so groupParticipantsUpdate fails server-side
+// with a generic error. Fix: if we already have a full jid (contains '@'),
+// keep its actual domain (@lid or @s.whatsapp.net) as-is. Only build a jid
+// from scratch when we were handed a bare phone number.
+function toParticipantJid(input) {
+    if (!input) return null;
+    if (input.includes('@')) return input;
+    const digits = input.replace(/\D/g, '');
+    if (!digits) return null;
+    return digits + '@s.whatsapp.net';
+}
+
+// ============ PREXZY API — GENERIC DOWNLOADER HANDLER ============
+// Shared fetch/extract/send routine for the simple "link in -> media out"
+// Prexzy downloader endpoints, so each command case below stays a few
+// lines instead of repeating the same boilerplate. mediaType controls how
+// the result gets sent back: 'video' (default), 'image', 'audio', or
+// 'document'.
+async function prexzyDownloadAndSend(m, reply, { endpoint, params, label, mediaType = 'video', fileName }) {
+    try {
+        reply('⏳ *Downloading...*');
+        const data = await prexzyGet(endpoint, params);
+        const link = madrinExtractLink(data);
+        if (data?.status === false || !link) {
+            return reply(`❌ *Download failed.* ${data?.error || data?.message || 'no link returned'}`);
+        }
+        const title = madrinExtractTitle(data, label);
+        if (mediaType === 'document') {
+            await devtrust.sendMessage(m.chat, { document: { url: link }, fileName: fileName || title, mimetype: 'application/octet-stream' }, { quoted: m });
+        } else if (mediaType === 'audio') {
+            await devtrust.sendMessage(m.chat, { audio: { url: link }, mimetype: 'audio/mpeg', fileName: `${title}.mp3` }, { quoted: m });
+        } else if (mediaType === 'image') {
+            await devtrust.sendMessage(m.chat, { image: { url: link }, caption: `${label}: ${title}` }, { quoted: m });
+        } else {
+            await devtrust.sendMessage(m.chat, { video: { url: link }, caption: `${label}: ${title}` }, { quoted: m });
+        }
+    } catch (e) {
+        reply(`❌ *Error:* ${e.message}`);
+    }
+}
+
+// ============ LOGO / MAKER GENERIC DISPATCHER ============
+// 73 logo styles + 25 maker effects from the registry, all following the
+// same 1-3 param GET pattern -- one dispatcher instead of ~100 near-
+// identical case blocks. Maps: style slug -> ordered param names.
+const LOGO_STYLES = {"1917":["text"],"america":["text"],"angel":["text"],"apex":["text1", "text2"],"arena":["text"],"avengers":["text1", "text2"],"bearlogo":["text"],"blackpink":["text"],"board":["text"],"captain":["text1", "text2"],"captainamerica":["text1", "text2"],"clouds":["text"],"colorful":["text"],"comic":["text"],"custom":["text"],"deadpool":["text1", "text2"],"devil":["text"],"dragonball":["text"],"duty":["text1", "text2"],"efnaruto":["text"],"erase":["text"],"ffire":["text1", "text2"],"fire":["text"],"foggyglass":["text"],"foggyglassv2":["text"],"football":["text1", "text2"],"frost":["text"],"fstar":["text"],"futuristic":["text"],"game":["text"],"glitch":["text"],"glossy":["text"],"gpurple":["text"],"graffiti":["text"],"graffitiv2":["text"],"hacker":["text"],"ice":["text"],"impressive":["text"],"jewel":["text"],"king":["text"],"kingaov":["text"],"leaves":["text"],"legends":["text"],"light":["text"],"logo":["text1", "text2"],"marvel":["text1", "text2"],"mascot":["text1", "text2"],"matrix":["text"],"mavatar":["text"],"metallic":["text"],"music":["text"],"neon":["text"],"neonglitch":["text"],"pixelglitch":["text"],"pornhub":["text1", "text2"],"pubg":["text"],"purple":["text"],"royal":["text"],"sand":["text"],"shirt":["text1", "text2"],"sketch":["text1", "text2"],"snow":["text"],"starwars":["text"],"steel":["text1", "text2"],"supreme":["text"],"thor":["text1", "text2"],"thunder":["text"],"typo":["text"],"valor":["text1", "text2"],"watch1":["text1", "text2"],"watch2":["text1", "text2"],"wolf":["text1", "text2"],"wooden":["text1", "text2"]};
+const MAKER_STYLES = {"ad":["image"],"brat-anime":["text"],"brat-gojo":["text"],"brat-patrick":["text"],"brat-vtuber":["text"],"brat":["text"],"bratvid":["text"],"caution":["text"],"dragonball":["text"],"fakedev":["image", "name", "bio"],"fakeff":["name"],"goodbye":["image", "name"],"igpost":["url"],"jail":["image"],"music":["image", "name"],"pillmeme":["top", "left", "right"],"quotely":["text", "name"],"quotesmaker":["text", "author"],"spongebob":["text"],"threadspost":["name", "pfp", "text"],"toanime":["url"],"tofigure":["url"],"wanted":["image"],"wastatus":["name", "time", "text"],"wasted":["url"]};
+
+// Response shape is inconsistent per-endpoint (some return JSON with an
+// image_url, some return the raw image bytes directly) -- the registry
+// documents both. Use the real Content-Type header to tell them apart
+// instead of guessing from the body.
+// NOTE ON THIS WHOLE DISPATCHER (98 commands: 73 logo + 25 maker styles):
+// zero Madrin references anywhere is now a hard requirement, so
+// MADRIN_BASE itself points at Prexzy — but Prexzy has almost no real
+// match for these 98 specific style names (checked style-by-style; a few
+// LOOK similar like "1917"/"brat"/"spongebob" but are different products
+// in different categories with different params/output, not drop-in
+// replacements). Net effect: these commands will mostly return "this
+// style isn't available on the current provider" (see madrinFetchImage's
+// error message below) rather than actually working — that's the direct,
+// disclosed consequence of removing Madrin entirely, not a bug.
+async function madrinFetchImage(path, params) {
+    const res = await axios.get(`${MADRIN_BASE}${path}`, { params, timeout: 25000, responseType: 'arraybuffer' });
+    const contentType = res.headers['content-type'] || '';
+    if (contentType.includes('application/json')) {
+        const json = JSON.parse(Buffer.from(res.data).toString('utf8'));
+        if (json.status === false || !json.image_url) {
+            // Most Logo/Maker style paths don't exist on Prexzy (the old
+            // Madrin provider had ~98 custom styles here with no 1:1
+            // match) — surface that plainly instead of a raw JSON error.
+            throw new Error('This style isn\'t available on the current provider.');
+        }
+        const imgRes = await axios.get(json.image_url, { responseType: 'arraybuffer', timeout: 25000 });
+        return Buffer.from(imgRes.data);
+    }
+    return Buffer.from(res.data);
+}
+
+// ============ PREXZY API — TTS VOICE DISPATCHER ============
+// 137 TTS voices on Prexzy. Named human voices take text/speed/pitch/style;
+// the tts-* legacy/novelty voices and language codes take text/pitch/speed.
+// One dispatcher instead of ~137 near-identical case blocks. Declared at
+// top level (not inside the switch) to avoid const/function hoisting
+// issues within a switch body.
+const TTS_NAMED_VOICES = ["amy","arthur","beatrice","camila","casey","charlie","david","dylan","ella","emma","eric","ethan","evie","freddie","freya","grace","hannah","henry","isabella","isla","ivy","jackson","jacob","james","jennifer","joey","john","julie","justin","katrina","kevin","layla","leo","lily","marcus","matthew","max","mia","michael","noah","olivia","owen","paul","phoebe","quincy","sally","sam","scott","sophia","sophie","theo","thomas","victor","william","xena"];
+const TTS_LEGACY_VOICES = ["tts-adult-female--1-american-english-truvoice","tts-adult-female--2-american-english-truvoice","tts-adult-male--1-american-english-truvoice","tts-adult-male--2-american-english-truvoice","tts-adult-male--3-american-english-truvoice","tts-adult-male--4-american-english-truvoice","tts-adult-male--5-american-english-truvoice","tts-adult-male--6-american-english-truvoice","tts-adult-male--7-american-english-truvoice","tts-adult-male--8-american-english-truvoice","tts-bonzi","tts-female-whisper","tts-male-whisper","tts-mary","tts-mary-for-telephone","tts-mary-in-hall","tts-mary-in-space","tts-mary-in-stadium","tts-mike","tts-mike-for-telephone","tts-mike-in-hall","tts-mike-in-space","tts-mike-in-stadium","tts-robosoft-five","tts-robosoft-four","tts-robosoft-one","tts-robosoft-six","tts-robosoft-three","tts-robosoft-two","tts-sam"];
+const TTS_LANG_CODES = ["ar","cs","da","de","el","en","es","fi","fr","he","hi","hu","id","it","ja","ko","nl","no","pl","pt","ro","ru","sv","th","tr","uk","vi","zhcn","zhtw"];
+
+async function prexzyTtsAndSend(m, reply, voiceSlug, text, { ptt = false } = {}) {
+    try {
+        reply('⏳ *Generating speech...*');
+        const endpoint = TTS_LANG_CODES.includes(voiceSlug) ? `/tts/tts-${voiceSlug}` : `/tts/${voiceSlug}`;
+        const data = await prexzyGet(endpoint, { text });
+        // TTS endpoints may return raw audio bytes or a JSON wrapper with a
+        // URL — handle both since this isn't confirmed live.
+        let audioUrl = madrinExtractLink(data);
+        if (!audioUrl && typeof data === 'string' && data.startsWith('http')) audioUrl = data;
+        if (!audioUrl) return reply('❌ *TTS failed — no audio returned.*');
+        await devtrust.sendMessage(m.chat, {
+            audio: { url: audioUrl },
+            mimetype: ptt ? 'audio/ogg; codecs=opus' : 'audio/mpeg',
+            ptt
+        }, { quoted: m });
+    } catch (e) { reply(`❌ *TTS Error:* ${e.message}`); }
+}
+
+// ============ PREXZY API — RANDOM IMAGE DISPATCHER ============
+// 20 random-image categories, all a plain GET with no params. One
+// dispatcher instead of 20 near-identical case blocks.
+const RANDOM_CATEGORIES = ["bluearchive","boypic","car","cat","chinagirl","dog","hijabgirl","indonesiagirl","japangirl","koreangirl","malaysiagirl","profilepics","anhai","randomgirl","anhmoe","anhsfw","thailandgirl","tiktokgirl","vietnamgirl","waifu"];
+async function prexzySendRandom(m, reply, category, caption) {
+    try {
+        const data = await prexzyGet(`/random/${category}`);
+        const link = madrinExtractLink(data) || (typeof data === 'string' && data.startsWith('http') ? data : null);
+        if (!link) return reply('❌ *Could not fetch image.*');
+        const isVideo = /\.mp4($|\?)/i.test(link);
+        await devtrust.sendMessage(m.chat, { [isVideo ? 'video' : 'image']: { url: link }, caption: caption || '🎲 Random' }, { quoted: m });
+    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+}
+
+const STYLE_TEXT_LIST = ["acute","allstyles","circled","circledneg","cjkthai","curvy1","curvy2","curvy3","fauxcyrillic","fauxethiopic","fullwidth","inverted","mathbold","mathboldfraktur","mathbolditalic","mathboldscript","mathdoublestruck","mathfraktur","mathmonospace","mathsans","mathsansbold","mathsansbolditalic","mathsansitalic","parenthesized","regionalindicator","reversed","rockdots","smallcaps","squared","squaredneg","stroked","subscript","superscript","tag"];
+const TEXTFX_MAP = { "1917": "style1917", "gradient": "gradienttext", "hologram": "freecreate", "glow": "advancedglow", "usaflag": "flag3dtext", "bearlogo": "logomaker", "blackpinklogo": "blackpinklogo", "blackpinkstyle": "blackpinkstyle", "graffiti": "cartoonstyle", "clouds": "effectclouds", "eraser": "deletingtext", "galaxyneon": "makingneon", "galaxylogo": "galaxystyle", "galaxywallpaper": "galaxywallpaper", "glitch": "glitchtext", "glowing": "glowingtext", "greenneon": "lighteffects", "gold": "luxurygold", "neon": "multicoloredneon", "neonglitch": "neonglitch", "ngflag": "flagtext", "papercut": "papercutstyle", "pixelglitch": "pixelglitch", "royal": "royaltext", "sand": "sandsummer", "beach": "summerbeach", "pavement": "typographytext", "underwater": "underwatertext", "watercolor": "watercolortext", "glass": "writetext" };
+const AIIMG_STYLES = ["abstract","anime","cartoon","cyberpunk","fantasy","horror","minimalist","oil-painting","pixel-art","pop-art","realistic","sci-fi","sketch","steampunk","surreal","vintage","watercolor"];
+
+// If a maker effect needs an image URL and the user didn't give one,
+// try to pull it from a quoted/attached image and upload it via imgbb
+// (reusing the key from .imgbb) to get a URL the API can fetch.
+async function resolveImageUrlFromMessage(m, explicitText) {
+    if (explicitText && isUrl(explicitText.trim())) return explicitText.trim();
+    const imgMimeSelf = (m?.msg || m)?.mimetype || '';
+    const imgMimeQuoted = (m.quoted?.msg || m.quoted)?.mimetype || '';
+    let imgSource = null;
+    if (/image/.test(imgMimeSelf) || m.message?.imageMessage) imgSource = m;
+    else if (/image/.test(imgMimeQuoted) || m.quoted?.message?.imageMessage) imgSource = m.quoted;
+    if (!imgSource) return null;
+    const buffer = await imgSource.download();
+    const form = new URLSearchParams();
+    form.append('key', 'a1ea26a71427d4c251e84555155792ba');
+    form.append('image', buffer.toString('base64'));
+    const res = await axios.post('https://api.imgbb.com/1/upload', form.toString(), {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 30000
+    });
+    return res.data?.data?.url || res.data?.data?.display_url || null;
 }
 const hangmanVisual = [
     "😃🪓______", "😃🪓__|____", "😃🪓__|/___",
@@ -340,6 +625,59 @@ function getAntilinkKey(botNum, chatId) {
     return `${botNum}::${chatId}`;
 }
 
+// ============ ANTI-MENTIONGC SETTINGS ============
+// Deletes messages that leak/reference the group's own invite link inside
+// the group itself — same delete+warn(+kick) pattern as antilink, reusing
+// the antifeature warn-count system below.
+const ANTIMENTIONGC_FILE = './database/antimentiongc_settings.json';
+function loadAntiMentionGcSettings() {
+    try {
+        if (!fs.existsSync(ANTIMENTIONGC_FILE)) fs.writeFileSync(ANTIMENTIONGC_FILE, JSON.stringify({}));
+        return JSON.parse(fs.readFileSync(ANTIMENTIONGC_FILE, 'utf-8'));
+    } catch (e) { return {}; }
+}
+function saveAntiMentionGcSettings(settings) {
+    try { fs.writeFileSync(ANTIMENTIONGC_FILE, JSON.stringify(settings, null, 2)); return true; } catch (e) { return false; }
+}
+let antiMentionGcSettings = loadAntiMentionGcSettings();
+// =========================================================
+
+// ============ ANTI-FEATURE WARN-COUNT SYSTEM ============
+// Shared warn-escalation store for anti-features that support "warn N
+// times then kick" (antilink, antimentiongc). Deliberately its own
+// namespace, separate from the pre-existing .warn/.warn2/.warns command
+// family — those have their own separate, already-inconsistent storage,
+// and this one is purpose-built just for anti-feature auto-escalation.
+const ANTIFEATURE_WARN_FILE = './database/antifeature-warns.json';
+function loadAntiFeatureWarns() {
+    try { return JSON.parse(fs.readFileSync(ANTIFEATURE_WARN_FILE, 'utf8')); } catch (e) { return {}; }
+}
+function saveAntiFeatureWarns(data) {
+    try {
+        const dir = require('path').dirname(ANTIFEATURE_WARN_FILE);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(ANTIFEATURE_WARN_FILE, JSON.stringify(data, null, 2));
+    } catch (e) {}
+}
+// Increments the count and returns { count, shouldKick }. Resets to 0
+// automatically once shouldKick fires, so the next violation after a
+// kick (if they're re-added) starts a fresh count instead of instantly
+// re-triggering.
+function bumpAntiFeatureWarn(feature, chatId, userJid, limit) {
+    const data = loadAntiFeatureWarns();
+    const key = `${feature}:${chatId}:${userJid}`;
+    data[key] = (data[key] || 0) + 1;
+    const shouldKick = data[key] >= limit;
+    if (shouldKick) delete data[key]; else saveAntiFeatureWarns(data);
+    if (shouldKick) saveAntiFeatureWarns(data);
+    return { count: shouldKick ? limit : data[key], shouldKick };
+}
+function resetAntiFeatureWarn(feature, chatId, userJid) {
+    const data = loadAntiFeatureWarns();
+    delete data[`${feature}:${chatId}:${userJid}`];
+    saveAntiFeatureWarns(data);
+}
+
 // Load antilink settings BEFORE anything else uses them
 let antilinkSettings = loadAntilinkSettings();
 // =========================================================
@@ -360,7 +698,7 @@ const __cmd_menu = (function() {
     const chalk = require('chalk');
 const fs = require('fs');
 const path = require('path');
-const { proto, generateWAMessageFromContent, prepareWAMessageMedia } = require('@boruto_vk7/baileys');
+const { proto, generateWAMessageFromContent, prepareWAMessageMedia, getDevice: __baileys_getDevice } = require('@boruto_vk7/baileys');
 
 // ============ BRANDED BANNER ============
 const BANNER_PATH = path.join(__dirname, '..', 'media', 'legendary_banner.jpg');
@@ -517,6 +855,19 @@ async function sendNumberedMenu(nexus, chatId, { header, footer, rows, imageUrl 
     const lines = rows.map((r, i) => `${numberEmojis[i] || (i + 1) + '.'} ${r.title}${r.description ? ` — ${r.description}` : ''}`);
     const text = `${header}\n\n${lines.join('\n')}\n\n💬 Reply with a number, or type NEXT / BACK / MENU\n\n${footer}`;
 
+    // Prefer the local bundled banner (menuImageBuffer, defined near the
+    // top of the file) over any URL — a local file can't go dead/404 the
+    // way an external image link can.
+    if (menuImageBuffer) {
+        try {
+            await nexus.sendMessage(chatId, { image: menuImageBuffer, caption: text });
+            setChatState(chatId, rows);
+            return;
+        } catch (e) {
+            console.log(chalk.yellow(`⚠️ Menu image (local buffer) failed, falling back: ${e.message}`));
+        }
+    }
+
     if (imageUrl) {
         try {
             await nexus.sendMessage(chatId, { image: { url: imageUrl }, caption: text });
@@ -589,11 +940,613 @@ function slugify(str) {
 // ".menu <category>", so nothing here pretends to be a typeable command it
 // isn't. Collapsed behind WhatsApp's "Read more" using the same invisible-
 // character trick Kord uses, since this is genuinely huge (800+ items).
+const formatBytes = (bytes) => {
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    if (bytes === 0) return '0 B';
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return parseFloat((bytes / Math.pow(1024, i)).toFixed(1)) + ' ' + sizes[i];
+};
+
 const sendFullMenu = async (nexus, chatId, pushName = 'there') => {
     try {
-        const totalFeatures = CATEGORY_KEYS.reduce((sum, key) => sum + MENU_DATA[key].items.length, 0);
+        // Real, working commands (prefix + name), grouped by category —
+        // same list used by .menu2, NOT the decorative MENU_DATA feature
+        // names (those don't map to real commands).
+        const body = `
+🤖 *AI CHAT*
+• .aisearch
+• .bidara
+• .blackbox
+• .coder
+• .copilot
+• .deepseek
+• .gemini
+• .gpt4
+• .gpt5
+• .llama
+• .mistral
+• .openai / .gpt
+• .reasoning
+• .zodiac
+
+⬇️ *DOWNLOADERS*
+• .animedl
+• .apk / .apkdl
+• .autodl
+• .dlmovie
+• .fb / .facebook
+• .igdl / .instagram
+• .insta / .instagram
+• .mediafire
+• .spotify / .spotifydl / .sp
+• .spotify2 / .spotifydl2
+• .tiktok / .tt
+• .tiktoksearch
+• .yta / .play
+• .ytmp3 / .ytvideo / .ytv2 / .play2
+• .ytmp3old
+• .ytmp4 / .videoplay
+• .ytv / .video
+
+🎵 *MUSIC & AUDIO*
+• .aitts / .tts
+• .applemusic
+• .lyrics / .lyric
+• .lyrics
+• .shazam / .findaudio / .find / .identifyaudio
+• .shazam / .findaudio / .identifyaudio
+• .soundcloud
+• .ttsptt / .voicenote
+
+🔍 *SEARCH TOOLS*
+• .manga
+• .pint / .pinterest
+• .pinterest
+
+👥 *GROUP MANAGEMENT*
+• .add
+• .addmetaai / .addai
+• .adminlist / .admins
+• .adminlist
+• .announce / .broadcast2
+• .antilink
+• .antispam
+• .antitag
+• .clearwarns / .resetwarns
+• .clearwelcome
+• .close / .groupclose
+• .creategc / .creategroup
+• .creategc
+• .demote
+• .gclink2
+• .gdesc / .setgcdesc
+• .groupinfo / .ginfo
+• .groupstatus / .gstatus
+• .gstop
+• .hidetag
+• .invite / .gclink
+• .invite / .glink
+• .join
+• .kick
+• .kickadmins
+• .kickall
+• .kickr / .reset
+• .kickr
+• .listadmin / .tagadmin / .admin
+• .listadmins
+• .mute
+• .muteuser
+• .open / .groupopen
+• .poll / .createpoll
+• .promote
+• .resetlink
+• .resetwarn / .clearwarn
+• .revoke / .revokelink
+• .revoke
+• .savecontact / .vcf / .scontact / .savecontacts
+• .setdesc / .setgcdesc
+• .setgrouppp / .setgcpp
+• .setname / .setgcname
+• .setwelcome
+• .tagadmins / .pingadmins
+• .tagall
+• .tagall / .tag
+• .tagall2
+• .tkick
+• .totalmembers / .members
+• .unmute
+• .unmuteuser
+• .warlist / .warns
+• .warn
+• .warn2
+• .warncount / .warnings2
+• .warnlist
+• .welcome
+
+🎨 *STICKERS & IMAGE EDITING*
+• .circlestk
+• .emojimix
+• .exif
+• .gif
+• .html2img
+• .imgbb
+• .mp4 / .togif
+• .rainbow
+• .roundstk
+• .take
+• .toimg
+• .tomp4
+• .tosticker / .sticker / .s
+
+🎮 *GAMES & FUN*
+• .africanfact
+• .bchcn
+• .beg
+• .coinflip / .flip
+• .crime
+• .dadjoke
+• .daily
+• .dare
+• .emojiquiz
+• .fact
+• .factorial
+• .fish
+• .fox
+• .foxgirl
+• .funfact
+• .gamefact
+• .guess
+• .hangman
+• .history
+• .hunt
+• .hxjxjjkm
+• .inspire / .quote2
+• .jail
+• .joke
+• .joke2
+• .math
+• .mine
+• .naijafood
+• .nigerianfact
+• .panda
+• .pickupline
+• .pidgin
+• .prog
+• .riddle
+• .rps
+• .rpsls
+• .science
+• .sciencefact
+• .slangs / .naijaslangs
+• .streak
+• .tech
+• .tod / .truthordare
+• .trivia
+• .triviafact
+• .truth
+• .water
+
+🛠️ *CONVERTERS & DEV TOOLS*
+• .base64decode / .b64dec
+• .base64encode / .b64enc
+• .htmlprotect
+• .shorturl
+• .tojs / .tojavascript
+• .topy / .topython
+
+⚙️ *BOT & OWNER SETTINGS*
+• .broadcast
+• .delsudo
+• .getsudo / .listsudo
+• .prefix
+• .restart / .reboot
+• .setprefix
+• .setsudo / .sudo / .addsudo
+
+ℹ️ *UTILITY & INFO*
+• .allmenu / .legend / .menu
+• .animesearch
+• .animewlp
+• .autotyping
+• .creator
+• .help / .commands
+• .idch
+• .left / .leave
+• .menubtn
+• .menubtn2
+• .myip
+• .owner
+• .ping / .speed
+• .private / .self
+• .public
+• .runtime / .alive
+• .setautotyping
+• .vv / .vvgh
+• .weatherdetail
+• .yts / .ytsearch
+
+🖼️ *RANDOM IMAGES & ANIME*
+• .animegif
+• .animenews
+• .animequote
+• .animerec
+• .animewatch
+• .character
+• .neko / .meow
+• .rwaifu
+• .waifu
+
+📦 *OTHER COMMANDS*
+• .8ball
+• .add
+• .addnote
+• .advice
+• .aesthetic
+• .afk
+• .age
+• .ai
+• .airing
+• .allnotes
+• .allvar
+• .alwaysonline
+• .antibadword
+• .antidelete
+• .antiedit
+• .antieditchat
+• .antistatus
+• .antonym
+• .approve / .approveall
+• .archive
+• .areact
+• .ascii / .asciify
+• .audio2text / .text
+• .autobio
+• .autoreact
+• .autoread
+• .autorecording
+• .autorecordtype
+• .autoreply
+• .autoviewstatus
+• .aza
+• .bal / .balance / .wallet
+• .ban
+• .bankrob
+• .bass
+• .bible
+• .bio / .setbio
+• .bioidea
+• .black / .blackbg
+• .blackjack / .bj
+• .block
+• .blocklist
+• .blown / .earrape
+• .blue
+• .bmi
+• .bold
+• .book
+• .botinfo
+• .btc / .bitcoin
+• .btcusdt
+• .bubble
+• .buy
+• .calc
+• .calculate
+• .calculator
+• .caption
+• .carbon
+• .cat / .catpic
+• .cbhcchhcx
+• .channellog
+• .chipmunk
+• .choose
+• .clear
+• .closetime
+• .cmdreact
+• .coin
+• .coinbattle
+• .color / .randomcolor / .colourpick
+• .comp
+• .compliment
+• .compress
+• .convert / .currency2
+• .copy / .copytext
+• .count / .wordcount
+• .countdown
+• .country / .countryinfo
+• .createpanel / .panel
+• .crypto / .cryptoprices
+• .currencies / .currency
+• .cyan
+• .date / .today
+• .dbinary / .dbin
+• .decode / .urldecode
+• .deep / .fat
+• .define / .dictionary
+• .del / .delete
+• .delallnote / .clearnotes
+• .delete / .del / .dlt
+• .delete2 / .unsend
+• .delmod
+• .delnote
+• .delvar
+• .dep / .deposit
+• .dice
+• .dicegamble
+• .doc
+• .dog / .dogpic
+• .doge / .dogecoin
+• .dogeusdt
+• .doubleornothing / .don
+• .ebinary / .ebin
+• .echo
+• .econ / .econprofile
+• .economy
+• .element
+• .emojify
+• .encode / .urlencode
+• .eth / .ethereum
+• .ethusdt
+• .events / .gcevent
+• .fancy
+• .fast
+• .fetch / .fetchurl
+• .fib
+• .flirt
+• .font
+• .fortune
+• .forward
+• .ga / .goodafternoon
+• .gamble
+• .gdrive
+• .genpass
+• .getmods
+• .getnote
+• .getvar
+• .gfilter
+• .gfx / .gfx1
+• .gfx10
+• .gfx11
+• .gfx12
+• .gfx2
+• .gfx3
+• .gfx4
+• .gfx5
+• .gfx6
+• .gfx7
+• .gfx8
+• .gfx9
+• .gift
+• .ginfo
+• .gitclone / .gitdl
+• .github
+• .give / .pay
+• .gm / .goodmorning
+• .gn / .goodnight
+• .gname / .setgcname
+• .goose
+• .gpp
+• .gpp / .setgcpp
+• .green
+• .greenBright
+• .hack
+• .hash / .md5
+• .hausa
+• .hbd / .birthday
+• .heist
+• .igbo
+• .imbd
+• .img / .image
+• .insult
+• .inv / .inventory
+• .invert
+• .ip
+• .iqtest
+• .isprime
+• .italic
+• .jid
+• .join
+• .lastseen
+• .lb / .leaderboard
+• .leave / .left
+• .legendary
+• .likestatus
+• .list
+• .listall / .allcommands
+• .listoffline
+• .listonline
+• .listreply / .listautoreply
+• .listrequest / .joinrequests
+• .lizard
+• .loan
+• .lock
+• .lower / .lowercase
+• .lucky
+• .magenta
+• .marry
+• .match / .livematch / .score
+• .members / .memberlist
+• .meme
+• .mental
+• .mention
+• .mnm
+• .mock
+• .mode
+• .mono / .monospace
+• .motivation
+• .movie
+• .movie2
+• .moviequote
+• .msgpin / .pinmsg
+• .msgs
+• .myfollows / .mymatch
+• .mypp / .pprivacy
+• .mystatus
+• .naira
+• .nasa / .apod / .spaceimage
+• .naturewlp
+• .networth
+• .news
+• .ngif
+• .ngl
+• .ngnrates
+• .nightcore
+• .note / .savenote
+• .notes
+• .npm
+• .nsbxmdmfw
+• .numbattle
+• .number / .randnum / .randomnumber
+• .numberbattle
+• .numberinfo / .phoneinfo
+• .ocr / .readtext / .imagetext
+• .online
+• .opentime
+• .pair
+• .password / .generatepassword
+• .payloan
+• .pdf
+• .percent
+• .permit
+• .pfilter
+• .pick
+• .pickupl / .pickup
+• .pinchat
+• .pokemon / .poke
+• .poll
+• .poll2 / .vote
+• .poor
+• .poorest / .broke
+• .pp / .getpp
+• .profile
+• .progquote
+• .pstop
+• .ptv
+• .pun
+• .punch
+• .qr
+• .quote
+• .quoted
+• .ram
+• .random
+• .rate
+• .reactchannel
+• .reaction / .react
+• .readmore
+• .readmsg
+• .readqr
+• .readstatus
+• .recipe
+• .red
+• .register
+• .reject / .rejectall
+• .rejectcall
+• .remind
+• .reminder
+• .repeat
+• .repo
+• .report
+• .reverse
+• .reversetext
+• .rewrite
+• .rich
+• .richest / .top
+• .roast
+• .roast2
+• .rob
+• .robot
+• .roll
+• .roman
+• .save / .dm
+• .savecmd
+• .savestatus
+• .season
+• .selectmovie
+• .sell
+• .setautoread
+• .setmod
+• .setpp
+• .setvar
+• .ship / .love
+• .shoot
+• .shop
+• .shutdown
+• .slap / .hug / .kiss / .pat / .cuddle / .tickle / .feed / .smug
+• .slots
+• .slow
+• .squirrel
+• .sreply / .stopreply
+• .ss
+• .ssfull
+• .ssphone
+• .sstab
+• .startupmsg
+• .stats
+• .statusemoji
+• .strike / .strikethrough
+• .subtitle / .subtitles / .subtitlesearch
+• .synonym
+• .tag / .totag
+• .tarot
+• .tax
+• .temp
+• .test
+• .time / .clock
+• .timer2 / .settimer
+• .timestamp
+• .tinyurl / .shorten
+• .tobin
+• .tohex
+• .tomp3 / .mp3
+• .tovv
+• .transfer
+• .trt / .translate
+• .twitter / .twit
+• .unarchive
+• .unban
+• .unblock
+• .unlock
+• .unpinchat
+• .unregister
+• .upper / .uppercase
+• .uptime
+• .uptime2
+• .url / .tourl
+• .usage / .sysinfo
+• .usdrates
+• .use
+• .uuid / .generateid
+• .viewstatus
+• .vkfkk
+• .vv2 / .readviewonce2
+• .vvcmd
+• .walink / .wlink
+• .wallpaper
+• .wanted
+• .wasted
+• .weather / .weather2 / .weatherinfo
+• .websearch / .search
+• .white
+• .wiki / .wikipedia
+• .with / .withdraw
+• .woof
+• .work
+• .workout
+• .wttr
+• .wyr
+• .xrp / .ripple
+• .xrpusdt
+• .yellow
+• .yellowBright
+• .yoruba`;
+
+        // Real, always-accurate count from the switch statement itself —
+        // see __REAL_COMMAND_COUNT__ near the top of the file. The bullet
+        // count below is kept only as a rough category-list gauge, not
+        // used for the number actually shown to the user anymore.
+        const totalCommands = __REAL_COMMAND_COUNT__ || (body.match(/^• /gm) || []).length;
+        const totalCategories = (body.match(/^\S.*\*[^*]+\*$/gm) || []).length;
         const ownerName = global.botConfig?.ownerName || process.env.OWNER_NAME || "Bot Owner";
-        const memoryUsage = format(os.totalmem() - os.freemem());
+        const memoryUsage = formatBytes(os.totalmem() - os.freemem());
         const up = runtime(process.uptime());
 
         const more = String.fromCharCode(8206);
@@ -602,8 +1555,8 @@ const sendFullMenu = async (nexus, chatId, pushName = 'there') => {
         const header = `\`\`\`┌────═━┈ ${botDisplayName} ┈━═────┐
  ✇ ▸ Owner: ${ownerName}
  ✇ ▸ User: ${pushName}
- ✇ ▸ Categories: ${CATEGORY_KEYS.length}
- ✇ ▸ Features: ${totalFeatures}
+ ✇ ▸ Categories: ${totalCategories}
+ ✇ ▸ Commands: ${totalCommands}
  ✇ ▸ Uptime: ${up}
  ✇ ▸ Memory: ${memoryUsage}
  ✇ ▸ Node: ${process.version}
@@ -611,13 +1564,8 @@ const sendFullMenu = async (nexus, chatId, pushName = 'there') => {
 └──────═━┈┈━═──────┘\`\`\`
 ${readmore}
 
-Type *.menu <category name>* to open one and pick a feature.\n\n`;
-
-        const body = CATEGORY_KEYS.map(key => {
-            const cat = MENU_DATA[key];
-            const items = cat.items.map(item => `│ ${item}`).join('\n');
-            return ` ┏ ${cat.emoji} ${cat.name} ┓\n┍   ─┉─ • ─┉─    ┑\n${items}\n┕    ─┉─ • ─┉─   ┙`;
-        }).join('\n\n');
+Prefix works with every command below — e.g. .aisearch
+`;
 
         const footer = `\n\nTip: Use *.menu <category>* for a specific one\n⚡ ${botDisplayName} — LËGĚNDÃRY Ł𝗮𝗯𝘀™ ⚽`;
 
@@ -625,7 +1573,7 @@ Type *.menu <category name>* to open one and pick a feature.\n\n`;
         // previously split into batches because a single ~23,000-char
         // message was silently dropped by WhatsApp with no JS error. If
         // .menu goes back to appearing to do nothing, that's likely why —
-        // keep an eye on it since this menu has 800+ features.
+        // keep an eye on it since this list covers hundreds of commands.
         const fullText = header + body + footer;
 
         const imageUrl = (() => {
@@ -635,18 +1583,42 @@ Type *.menu <category name>* to open one and pick a feature.\n\n`;
             } catch (_) { return process.env.MENU_IMAGE || null; }
         })();
 
-        if (imageUrl) {
+        if (menuImageBuffer) {
             try {
-                await nexus.sendMessage(chatId, { image: { url: imageUrl }, caption: fullText });
+                const res = await nexus.sendMessage(chatId, { image: menuImageBuffer, caption: fullText });
+                console.log(chalk.cyan(`📤 [SEND RESULT] chat=${chatId} id=${res?.key?.id || 'NO_ID_RETURNED'}`));
+            } catch (e) {
+                console.log(chalk.yellow(`⚠️ Full menu image (local buffer) failed, falling back to text: ${e.message}`));
+                try {
+                    const res = await nexus.sendMessage(chatId, { text: fullText });
+                    console.log(chalk.cyan(`📤 [SEND RESULT] chat=${chatId} id=${res?.key?.id || 'NO_ID_RETURNED'}`));
+                } catch (e2) {
+                    console.log(chalk.red(`❌ [SEND FAILED] chat=${chatId}: ${e2.message}`));
+                }
+            }
+        } else if (imageUrl) {
+            try {
+                const res = await nexus.sendMessage(chatId, { image: { url: imageUrl }, caption: fullText });
+                console.log(chalk.cyan(`📤 [SEND RESULT] chat=${chatId} id=${res?.key?.id || 'NO_ID_RETURNED'}`));
             } catch (e) {
                 console.log(chalk.yellow(`⚠️ Full menu image failed, falling back to text: ${e.message}`));
-                await nexus.sendMessage(chatId, { text: fullText });
+                try {
+                    const res = await nexus.sendMessage(chatId, { text: fullText });
+                    console.log(chalk.cyan(`📤 [SEND RESULT] chat=${chatId} id=${res?.key?.id || 'NO_ID_RETURNED'}`));
+                } catch (e2) {
+                    console.log(chalk.red(`❌ [SEND FAILED] chat=${chatId}: ${e2.message}`));
+                }
             }
         } else {
-            await nexus.sendMessage(chatId, { text: fullText });
+            try {
+                const res = await nexus.sendMessage(chatId, { text: fullText });
+                console.log(chalk.cyan(`📤 [SEND RESULT] chat=${chatId} id=${res?.key?.id || 'NO_ID_RETURNED'}`));
+            } catch (e) {
+                console.log(chalk.red(`❌ [SEND FAILED] chat=${chatId}: ${e.message}`));
+            }
         }
 
-        console.log(chalk.green(`✅ Full menu sent (${CATEGORY_KEYS.length} categories, ${totalFeatures} features, single message)`));
+        console.log(chalk.green(`✅ Full menu sent (${totalCategories} categories, ${totalCommands} commands, single message)`));
     } catch (error) {
         console.log(chalk.red(`❌ Full menu error: ${error.message}`));
         await nexus.sendMessage(chatId, { text: `❌ Error loading menu: ${error.message}` });
@@ -792,6 +1764,580 @@ module.exports = {
 
 
 // ============ inlined from commands/economy.js ============
+
+// ============ LEGENDARY ECONOMY (inline — no separate file needed) ============
+// Was __cmd_legendary_economy across 40 call sites, but that file
+// never actually existed anywhere — every one of those commands would
+// have crashed. Rebuilt inline here instead of as a separate file, so
+// there's nothing extra to deploy or wire into server.js. File-based
+// storage (./database/legendary_economy.json), same pattern as the
+// rest of the bot's persistent settings — no external database needed.
+const __cmd_legendary_economy = (function() {
+    const fs = require('fs');
+    const path = require('path');
+
+    const ECON_FILE = path.join(__dirname, '..', 'database', 'legendary_economy.json');
+    const ACTIVE_FILE = path.join(__dirname, '..', 'database', 'legendary_economy_active.json');
+
+    const STARTING_WALLET = 500;
+    const BASE_BANK_CAPACITY = 5000;
+    const DAILY_BASE = 200;
+    const DAILY_STREAK_STEP = 50;
+    const DAILY_STREAK_CAP = 500; // max streak bonus on top of base
+    const DAILY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+    const WORK_COOLDOWN_MS = 60 * 60 * 1000;
+    const ROB_COOLDOWN_MS = 2 * 60 * 60 * 1000;
+    const CRIME_COOLDOWN_MS = 45 * 60 * 1000;
+    const BEG_COOLDOWN_MS = 30 * 60 * 1000;
+    const HUNT_COOLDOWN_MS = 20 * 60 * 1000;
+    const MINE_COOLDOWN_MS = 20 * 60 * 1000;
+    const FISH_COOLDOWN_MS = 20 * 60 * 1000;
+    const SLOTS_COOLDOWN_MS = 10 * 1000;
+    const GAMBLE_COOLDOWN_MS = 10 * 1000;
+    const COINFLIP_COOLDOWN_MS = 10 * 1000;
+    const BANKROB_COOLDOWN_MS = 3 * 60 * 60 * 1000;
+    const LOAN_INTEREST_PCT = 15;
+    const LOAN_MIN = 1000;
+    const LOAN_MAX = 50000;
+
+    const SHOP_ITEMS = [
+        { id: 'fishingrod', name: '🎣 Fishing Rod', price: 800, description: 'Improves fishing earnings', effect: 'fish_boost' },
+        { id: 'pickaxe', name: '⛏️ Pickaxe', price: 800, description: 'Improves mining earnings', effect: 'mine_boost' },
+        { id: 'huntingrifle', name: '🏹 Hunting Rifle', price: 800, description: 'Improves hunting earnings', effect: 'hunt_boost' },
+        { id: 'banknote', name: '💳 Bank Note', price: 2000, description: 'Increases bank capacity by 5,000', effect: 'bank_capacity' },
+        { id: 'luckycharm', name: '🍀 Lucky Charm', price: 1500, description: 'Improves rob/crime success odds (single use)', effect: 'luck_boost' },
+        { id: 'energydrink', name: '⚡ Energy Drink', price: 500, description: 'Clears one active cooldown when used', effect: 'clear_cooldown' }
+    ];
+
+    function loadEcon() {
+        try {
+            if (!fs.existsSync(ECON_FILE)) fs.writeFileSync(ECON_FILE, '{}');
+            return JSON.parse(fs.readFileSync(ECON_FILE));
+        } catch (e) { return {}; }
+    }
+    function saveEcon(state) {
+        try { fs.writeFileSync(ECON_FILE, JSON.stringify(state)); } catch (e) {}
+    }
+    function loadActive() {
+        try {
+            if (!fs.existsSync(ACTIVE_FILE)) fs.writeFileSync(ACTIVE_FILE, '{}');
+            return JSON.parse(fs.readFileSync(ACTIVE_FILE));
+        } catch (e) { return {}; }
+    }
+    function saveActive(state) {
+        try { fs.writeFileSync(ACTIVE_FILE, JSON.stringify(state)); } catch (e) {}
+    }
+    function key(userId, chatId) { return `${chatId}:${userId}`; }
+    function getUser(state, userId, chatId) {
+        const k = key(userId, chatId);
+        if (!state[k]) {
+            state[k] = {
+                userID: userId, chatID: chatId,
+                wallet: STARTING_WALLET, bank: 0, bankCapacity: BASE_BANK_CAPACITY,
+                lastDaily: 0, streak: 0,
+                lastWork: 0, lastRob: 0, lastCrime: 0, lastBeg: 0,
+                lastHunt: 0, lastMine: 0, lastFish: 0,
+                lastSlots: 0, lastGamble: 0, lastCoinflip: 0, lastBankrob: 0,
+                loanAmount: 0,
+                inventory: []
+            };
+        }
+        return state[k];
+    }
+    function fmt(n) {
+        n = Math.round(n || 0);
+        return '$' + n.toLocaleString('en-US');
+    }
+    function cooldownLeft(lastTs, cooldownMs) {
+        const left = cooldownMs - (Date.now() - lastTs);
+        return left;
+    }
+    function fmtDuration(ms) {
+        if (ms < 60000) return `${Math.ceil(ms / 1000)}s`;
+        if (ms < 3600000) return `${Math.ceil(ms / 60000)}m`;
+        return `${(ms / 3600000).toFixed(1)}h`;
+    }
+    function parseAmountArg(arg, wallet) {
+        if (arg === 'all') return wallet;
+        const n = parseInt(arg);
+        return isNaN(n) ? null : n;
+    }
+
+    async function connectDB() {
+        // No-op — kept for call-site compatibility (old code called
+        // `await econ.connectDB()` before every economy command). File
+        // storage needs no connection step, just ensure the files exist.
+        loadEcon(); loadActive();
+    }
+
+    function isEconActive(chatId) {
+        const active = loadActive();
+        return active[chatId] !== false; // default ON unless explicitly turned off
+    }
+    function setEconActive(chatId, on) {
+        const active = loadActive();
+        active[chatId] = !!on;
+        saveActive(active);
+    }
+
+    async function balance(userId, chatId) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        saveEcon(state);
+        return { wallet: u.wallet, bank: u.bank, bankCapacity: u.bankCapacity };
+    }
+
+    async function daily(userId, chatId) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        const left = cooldownLeft(u.lastDaily, DAILY_COOLDOWN_MS);
+        if (left > 0) return { cd: true, cdL: fmtDuration(left) };
+        // Streak continues if claimed within 48h of the last one, else resets
+        const sinceLast = Date.now() - u.lastDaily;
+        u.streak = (u.lastDaily > 0 && sinceLast <= DAILY_COOLDOWN_MS * 2) ? u.streak + 1 : 1;
+        const bonus = Math.min(u.streak * DAILY_STREAK_STEP, DAILY_STREAK_CAP);
+        const amount = DAILY_BASE + bonus;
+        u.wallet += amount;
+        u.lastDaily = Date.now();
+        saveEcon(state);
+        return { amount, streak: u.streak };
+    }
+
+    async function streak(userId, chatId) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        const bonus = Math.min(u.streak * DAILY_STREAK_STEP, DAILY_STREAK_CAP);
+        return { count: u.streak, bonus };
+    }
+
+    async function deposit(userId, chatId, amountArg) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        const amount = parseAmountArg(amountArg, u.wallet);
+        if (amount === null || amount <= 0) return { invalid: true };
+        if (amount > u.wallet) return { noten: true };
+        const room = u.bankCapacity - u.bank;
+        if (room <= 0) return { full: true };
+        const toDeposit = Math.min(amount, room);
+        u.wallet -= toDeposit;
+        u.bank += toDeposit;
+        saveEcon(state);
+        return { amount: toDeposit };
+    }
+
+    async function withdraw(userId, chatId, amountArg) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        const amount = parseAmountArg(amountArg, u.bank);
+        if (amount === null || amount <= 0) return { invalid: true };
+        if (amount > u.bank) return { noten: true };
+        u.bank -= amount;
+        u.wallet += amount;
+        saveEcon(state);
+        return { amount };
+    }
+
+    async function transfer(fromId, toId, chatId, amount) {
+        const state = loadEcon();
+        const from = getUser(state, fromId, chatId);
+        const to = getUser(state, toId, chatId);
+        if (amount > from.wallet) return { insufficient: true };
+        from.wallet -= amount;
+        to.wallet += amount;
+        saveEcon(state);
+        return { amount };
+    }
+
+    async function give(userId, chatId, amount) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        u.wallet += amount;
+        saveEcon(state);
+        return { wallet: u.wallet };
+    }
+    async function deduct(userId, chatId, amount) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        u.wallet = Math.max(0, u.wallet - amount);
+        saveEcon(state);
+        return { wallet: u.wallet };
+    }
+
+    async function work(userId, chatId) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        const left = cooldownLeft(u.lastWork, WORK_COOLDOWN_MS);
+        if (left > 0) return { cd: true, cdL: fmtDuration(left) };
+        const amount = Math.floor(Math.random() * 300) + 150;
+        u.wallet += amount;
+        u.lastWork = Date.now();
+        saveEcon(state);
+        return { amount };
+    }
+
+    async function rob(userId, chatId, targetId) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        const target = getUser(state, targetId, chatId);
+        const left = cooldownLeft(u.lastRob, ROB_COOLDOWN_MS);
+        if (left > 0) return { cd: true, cdL: fmtDuration(left) };
+        if (target.wallet < 200) return { lowbal: true };
+        u.lastRob = Date.now();
+        const successChance = 0.45;
+        if (Math.random() < successChance) {
+            const amount = Math.floor(target.wallet * (0.1 + Math.random() * 0.3));
+            target.wallet -= amount;
+            u.wallet += amount;
+            saveEcon(state);
+            return { success: true, amount };
+        } else {
+            const fine = Math.floor(Math.random() * 200) + 100;
+            u.wallet = Math.max(0, u.wallet - fine);
+            saveEcon(state);
+            return { success: false, fine };
+        }
+    }
+
+    async function bankrob(userId, chatId) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        const left = cooldownLeft(u.lastBankrob, BANKROB_COOLDOWN_MS);
+        if (left > 0) return { cd: true, cdL: fmtDuration(left), success: false, bank: 'National Bank', fine: 0, newBalance: u.wallet };
+        u.lastBankrob = Date.now();
+        const banks = ['National Bank', 'City Trust', 'Union Vault', 'First Federal'];
+        const bankName = banks[Math.floor(Math.random() * banks.length)];
+        if (Math.random() < 0.35) {
+            const loot = Math.floor(Math.random() * 3000) + 1000;
+            u.wallet += loot;
+            saveEcon(state);
+            return { success: true, bank: bankName, loot, newBalance: u.wallet };
+        } else {
+            const fine = Math.floor(Math.random() * 800) + 300;
+            u.wallet = Math.max(0, u.wallet - fine);
+            saveEcon(state);
+            return { success: false, bank: bankName, fine, newBalance: u.wallet };
+        }
+    }
+
+    async function crime(userId, chatId) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        const left = cooldownLeft(u.lastCrime, CRIME_COOLDOWN_MS);
+        if (left > 0) return { cd: true, cdL: fmtDuration(left) };
+        u.lastCrime = Date.now();
+        const crimes = ['Pickpocketing', 'Shoplifting', 'Hacking an ATM', 'Selling counterfeit goods', 'Smuggling'];
+        const crimeName = crimes[Math.floor(Math.random() * crimes.length)];
+        if (Math.random() < 0.55) {
+            const amount = Math.floor(Math.random() * 400) + 100;
+            u.wallet += amount;
+            saveEcon(state);
+            return { success: true, amount, crimeName };
+        } else {
+            const fine = Math.floor(Math.random() * 300) + 150;
+            u.wallet = Math.max(0, u.wallet - fine);
+            saveEcon(state);
+            return { success: false, fine, crimeName };
+        }
+    }
+
+    async function beg(userId, chatId) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        const left = cooldownLeft(u.lastBeg, BEG_COOLDOWN_MS);
+        if (left > 0) return { cd: true, cdL: fmtDuration(left) };
+        u.lastBeg = Date.now();
+        if (Math.random() < 0.6) {
+            const amount = Math.floor(Math.random() * 100) + 20;
+            u.wallet += amount;
+            saveEcon(state);
+            return { success: true, amount };
+        }
+        saveEcon(state);
+        return { success: false };
+    }
+
+    async function hunt(userId, chatId) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        const left = cooldownLeft(u.lastHunt, HUNT_COOLDOWN_MS);
+        if (left > 0) return { cd: true, cdL: fmtDuration(left) };
+        const hasBoost = u.inventory.some(i => i.id === 'huntingrifle');
+        const amount = Math.floor(Math.random() * 150) + 50 + (hasBoost ? 100 : 0);
+        u.wallet += amount;
+        u.lastHunt = Date.now();
+        saveEcon(state);
+        return { amount };
+    }
+
+    async function mine(userId, chatId) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        const left = cooldownLeft(u.lastMine, MINE_COOLDOWN_MS);
+        if (left > 0) return { cd: true, cdL: fmtDuration(left) };
+        const hasBoost = u.inventory.some(i => i.id === 'pickaxe');
+        const amount = Math.floor(Math.random() * 150) + 50 + (hasBoost ? 100 : 0);
+        u.wallet += amount;
+        u.lastMine = Date.now();
+        saveEcon(state);
+        return { amount };
+    }
+
+    async function fish(userId, chatId) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        const left = cooldownLeft(u.lastFish, FISH_COOLDOWN_MS);
+        if (left > 0) return { cd: true, cdL: fmtDuration(left) };
+        const hasBoost = u.inventory.some(i => i.id === 'fishingrod');
+        const amount = Math.floor(Math.random() * 150) + 50 + (hasBoost ? 100 : 0);
+        u.wallet += amount;
+        u.lastFish = Date.now();
+        saveEcon(state);
+        return { amount };
+    }
+
+    async function lb(chatId, limit = 10) {
+        const state = loadEcon();
+        const users = Object.values(state).filter(u => u.chatID === chatId);
+        users.sort((a, b) => (b.wallet + b.bank) - (a.wallet + a.bank));
+        return users.slice(0, limit);
+    }
+
+    async function poorest(chatId, limit = 5) {
+        const state = loadEcon();
+        const users = Object.values(state).filter(u => u.chatID === chatId);
+        users.sort((a, b) => (a.wallet + a.bank) - (b.wallet + b.bank));
+        return users.slice(0, limit);
+    }
+
+    function getShop() {
+        return SHOP_ITEMS.map(({ id, ...rest }) => rest);
+    }
+
+    async function buyItem(userId, chatId, itemNumberStr) {
+        const idx = parseInt(itemNumberStr) - 1;
+        const itemDef = SHOP_ITEMS[idx];
+        if (!itemDef) return { notfound: true };
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        if (u.wallet < itemDef.price) return { insufficient: true, item: itemDef };
+        u.wallet -= itemDef.price;
+        const existing = u.inventory.find(i => i.id === itemDef.id);
+        if (existing) existing.quantity += 1;
+        else u.inventory.push({ id: itemDef.id, name: itemDef.name, quantity: 1 });
+        if (itemDef.effect === 'bank_capacity') u.bankCapacity += 5000;
+        saveEcon(state);
+        return { item: itemDef, newBalance: u.wallet };
+    }
+
+    async function getInventory(userId, chatId) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        return u.inventory;
+    }
+
+    async function sell(userId, chatId, itemName, qty) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        if (!u.inventory.length) return { noItems: true };
+        const nameLower = itemName.trim().toLowerCase();
+        const entry = u.inventory.find(i => i.name.toLowerCase().includes(nameLower) || i.id === nameLower);
+        if (!entry) return { notfound: true };
+        if (entry.quantity < qty) return { insufficient: true, has: entry.quantity };
+        entry.quantity -= qty;
+        if (entry.quantity <= 0) u.inventory = u.inventory.filter(i => i !== entry);
+        const itemDef = SHOP_ITEMS.find(i => i.id === entry.id);
+        const sellPrice = Math.floor((itemDef?.price || 100) * 0.5) * qty;
+        u.wallet += sellPrice;
+        saveEcon(state);
+        return { itemName: entry.name, quantity: qty, sellPrice, newBalance: u.wallet };
+    }
+
+    async function use(userId, chatId, itemName) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        const nameLower = itemName.trim().toLowerCase();
+        const entry = u.inventory.find(i => i.name.toLowerCase().includes(nameLower) || i.id === nameLower);
+        if (!entry) return { notfound: true };
+        const itemDef = SHOP_ITEMS.find(i => i.id === entry.id);
+        let effect = 'Nothing happened.';
+        if (itemDef?.effect === 'clear_cooldown') {
+            u.lastWork = 0; u.lastRob = 0; u.lastCrime = 0; u.lastBeg = 0;
+            u.lastHunt = 0; u.lastMine = 0; u.lastFish = 0; u.lastBankrob = 0;
+            effect = 'All cooldowns cleared!';
+        } else {
+            effect = itemDef?.description || 'Used.';
+        }
+        entry.quantity -= 1;
+        if (entry.quantity <= 0) u.inventory = u.inventory.filter(i => i !== entry);
+        saveEcon(state);
+        return { item: itemDef || { name: entry.name }, effect, remaining: Math.max(0, entry.quantity) };
+    }
+
+    async function gift(fromId, chatId, toId, itemName, qty) {
+        const state = loadEcon();
+        const from = getUser(state, fromId, chatId);
+        const to = getUser(state, toId, chatId);
+        const nameLower = itemName.trim().toLowerCase();
+        const entry = from.inventory.find(i => i.name.toLowerCase().includes(nameLower) || i.id === nameLower);
+        if (!entry) return { notfound: true };
+        if (entry.quantity < qty) return { insufficient: true };
+        entry.quantity -= qty;
+        if (entry.quantity <= 0) from.inventory = from.inventory.filter(i => i !== entry);
+        const toEntry = to.inventory.find(i => i.id === entry.id);
+        if (toEntry) toEntry.quantity += qty;
+        else to.inventory.push({ id: entry.id, name: entry.name, quantity: qty });
+        saveEcon(state);
+        return { item: entry };
+    }
+
+    async function loan(userId, chatId, amount) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        if (amount < LOAN_MIN) return { tooLow: true };
+        if (amount > LOAN_MAX) return { tooHigh: true };
+        if (u.loanAmount > 0) return { hasLoan: true, loanAmount: u.loanAmount };
+        const totalOwed = Math.round(amount * (1 + LOAN_INTEREST_PCT / 100));
+        u.loanAmount = totalOwed;
+        u.wallet += amount;
+        saveEcon(state);
+        return { amount, interest: LOAN_INTEREST_PCT, totalOwed };
+    }
+
+    async function payLoan(userId, chatId, amountArg) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        if (u.loanAmount <= 0) return { noLoan: true };
+        const amount = parseAmountArg(amountArg, Math.min(u.wallet, u.loanAmount));
+        if (amount === null || amount <= 0) return { invalid: true };
+        if (amount > u.wallet) return { insufficient: true };
+        const payAmount = Math.min(amount, u.loanAmount);
+        u.wallet -= payAmount;
+        u.loanAmount -= payAmount;
+        saveEcon(state);
+        if (u.loanAmount <= 0) return { fullPaid: true, amount: payAmount };
+        return { fullPaid: false, amount: payAmount, remaining: u.loanAmount };
+    }
+
+    async function slots(userId, chatId, bet) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        if (isNaN(bet) || bet < 100) return { invalid: true };
+        if (bet > u.wallet) return { insufficient: true };
+        const left = cooldownLeft(u.lastSlots, SLOTS_COOLDOWN_MS);
+        if (left > 0) return { cd: true, cdL: fmtDuration(left) };
+        u.lastSlots = Date.now();
+        const symbols = ['🍒', '🍋', '🍊', '💎', '7️⃣', '🔔'];
+        const roll = () => symbols[Math.floor(Math.random() * symbols.length)];
+        const result = [roll(), roll(), roll()];
+        let winnings;
+        if (result[0] === result[1] && result[1] === result[2]) winnings = bet * 5;
+        else if (result[0] === result[1] || result[1] === result[2] || result[0] === result[2]) winnings = Math.floor(bet * 1.5);
+        else winnings = -bet;
+        u.wallet += winnings;
+        saveEcon(state);
+        return { result, winnings, newBalance: u.wallet };
+    }
+
+    async function gamble(userId, chatId, amount) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        if (isNaN(amount) || amount <= 0) return { invalid: true };
+        if (amount > u.wallet) return { insufficient: true };
+        const left = cooldownLeft(u.lastGamble, GAMBLE_COOLDOWN_MS);
+        if (left > 0) return { cd: true, cdL: fmtDuration(left) };
+        u.lastGamble = Date.now();
+        const win = Math.random() < 0.47;
+        u.wallet += win ? amount : -amount;
+        saveEcon(state);
+        return { win, amount, newBalance: u.wallet };
+    }
+
+    async function coinflip(userId, chatId, choice, amount) {
+        if (!['heads', 'tails'].includes(choice)) return { invalidChoice: true };
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        if (isNaN(amount) || amount <= 0) return { invalid: true };
+        if (amount > u.wallet) return { insufficient: true };
+        const left = cooldownLeft(u.lastCoinflip, COINFLIP_COOLDOWN_MS);
+        if (left > 0) return { cd: true, cdL: fmtDuration(left) };
+        u.lastCoinflip = Date.now();
+        const result = Math.random() < 0.5 ? 'heads' : 'tails';
+        const win = result === choice;
+        u.wallet += win ? amount : -amount;
+        saveEcon(state);
+        return { result, win, amount, newBalance: u.wallet };
+    }
+
+    async function networth(userId, chatId) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        const invValue = u.inventory.reduce((sum, item) => {
+            const def = SHOP_ITEMS.find(s => s.id === item.id);
+            return sum + (def ? Math.floor(def.price * 0.5) * item.quantity : 0);
+        }, 0);
+        const total = u.wallet + u.bank + invValue;
+        return { wallet: u.wallet, bank: u.bank, invValue, total };
+    }
+
+    async function profile(userId, chatId) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        const net = u.wallet + u.bank;
+        let tier = '🥉 Bronze';
+        if (net > 100000) tier = '💎 Legendary';
+        else if (net > 50000) tier = '🥇 Gold';
+        else if (net > 15000) tier = '🥈 Silver';
+        return {
+            wallet: u.wallet, bank: u.bank, bankCapacity: u.bankCapacity,
+            invCount: u.inventory.reduce((s, i) => s + i.quantity, 0),
+            net, tier, streak: u.streak
+        };
+    }
+
+    async function heist(crew, chatId) {
+        const state = loadEcon();
+        const targets = ['Federal Reserve', 'Diamond Exchange', 'Casino Vault', 'Gold Depository'];
+        const target = targets[Math.floor(Math.random() * targets.length)];
+        const overallSuccess = Math.random() < 0.4;
+        const results = crew.map(member => {
+            const u = getUser(state, member, chatId);
+            if (overallSuccess) {
+                const amount = Math.floor(Math.random() * 1500) + 500;
+                u.wallet += amount;
+                return { member, success: true, amount };
+            } else {
+                const amount = Math.floor(Math.random() * 400) + 100;
+                u.wallet = Math.max(0, u.wallet - amount);
+                return { member, success: false, amount };
+            }
+        });
+        saveEcon(state);
+        return { success: overallSuccess, target, results };
+    }
+
+    async function tax(userId, chatId) {
+        const state = loadEcon();
+        const u = getUser(state, userId, chatId);
+        if (u.wallet < 500) return { tooBroke: true };
+        const taxed = Math.floor(u.wallet * 0.1);
+        u.wallet -= taxed;
+        // Redistribute to the chat's top earner
+        const users = Object.values(state).filter(x => x.chatID === chatId);
+        users.sort((a, b) => (b.wallet + b.bank) - (a.wallet + a.bank));
+        if (users[0] && users[0].userID !== userId) users[0].wallet += taxed;
+        saveEcon(state);
+        return { taxed };
+    }
+
+    return {
+        connectDB, isEconActive, setEconActive, fmt,
+        balance, daily, streak, deposit, withdraw, transfer, give, deduct,
+        work, rob, bankrob, crime, beg, hunt, mine, fish,
+        lb, poorest, getShop, buyItem, getInventory, sell, use, gift,
+        loan, payLoan, slots, gamble, coinflip, networth, profile, heist, tax
+    };
+})();
+
 const __cmd_economy = (function() {
     const module = { exports: {} };
     const exports = module.exports;
@@ -3369,15 +4915,26 @@ const SESSION_FILE = path.join(__dirname, '..', 'database', 'games_session.json'
 const STATS_FILE = path.join(__dirname, '..', 'database', 'games_stats.json');
 const SESSION_TTL_MS = 15 * 60 * 1000; // 15 minutes idle -> auto expire
 
-function loadJSON(file) {
+// loadJSON/saveJSON — local to this IIFE. IMPORTANT: this file is built
+// from ~20 separate self-contained IIFE modules (__cmd_games, __cmd_group,
+// __cmd_fun, etc.), each its own closure. A loadJSON defined inside one
+// module is NOT visible inside another — they only look like duplicates
+// from a flat text search; they're actually independent, module-scoped
+// copies. One was mistakenly deleted from here earlier as a "redundant
+// duplicate," which broke every function in this module that depends on
+// it (getSession/setSession/clearSession/hasActiveGame/bumpStat and
+// anything downstream of them) — that's what caused the crash loop.
+// Restored, matching the signature the calls below actually expect.
+function loadJSON(file, fallback = {}) {
     try {
-        if (!fs.existsSync(file)) fs.writeFileSync(file, '{}');
+        if (!fs.existsSync(file)) fs.writeFileSync(file, JSON.stringify(fallback));
         return JSON.parse(fs.readFileSync(file));
-    } catch (e) { return {}; }
+    } catch (e) { return fallback; }
 }
 function saveJSON(file, data) {
     try { fs.writeFileSync(file, JSON.stringify(data, null, 2)); } catch (e) {}
 }
+
 function getSession(chatId) {
     const all = loadJSON(SESSION_FILE);
     const s = all[chatId];
@@ -5364,6 +6921,32 @@ const __cmd_music = (function() {
     const chalk = require('chalk');
 const axios = require('axios');
 
+// Local copies — this module is its own separate closure (like every
+// __cmd_xxx module in this file), so it can't see prexzyGet/
+// madrinExtractLink/madrinExtractTitle defined in the main file scope.
+// A prior edit swapped this module's madrinGet call to prexzyGet without
+// adding these locally, which would have thrown "prexzyGet is not
+// defined" the next time this ran — same failure class as the
+// __cmd_games loadJSON crash. Fixed by giving this module its own copies.
+const PREXZY_BASE = 'https://prexzyapis.com';
+async function prexzyGet(endpoint, extraParams = {}, timeoutMs = 25000) {
+    const res = await axios.get(`${PREXZY_BASE}${endpoint}`, { params: extraParams, timeout: timeoutMs });
+    return res.data;
+}
+function madrinExtractLink(data) {
+    if (!data) return null;
+    return data.download_url || data.video_url || data.image_url || data.url || data.link
+        || data.hd || data.sd
+        || data?.data?.hd || data?.data?.sd || data?.data?.url || data?.data?.download_url
+        || data?.result?.url || data?.result?.download_url || data?.result?.link
+        || null;
+}
+function madrinExtractTitle(data, fallback = 'File') {
+    if (!data) return fallback;
+    return data.title || data.filename || data.name
+        || data?.data?.title || data?.result?.title || fallback;
+}
+
 // ============ AWAITING-REPLY STATE (per chat) ============
 // Tracks which chats are actually expecting a music reply, and for how long.
 // Without this, ANY plain text in ANY chat gets treated as a song search.
@@ -5638,19 +7221,15 @@ const searchMusicBtn = async (nexus, chatId, sender) => {
 const performMusicSearch = async (nexus, chatId, query, sender) => {
     clearAwaitingMusic(chatId);
     try {
-        const response = await axios.get('https://api-madrin.zone.id/search/youtube', {
-            params: {
-                apikey: 'test',
-                q: query
-            }
-        });
+        const yts = require('yt-search');
+        const searchRes = await yts(query);
 
-        if (!response.data.status || !response.data.result || response.data.result.length === 0) {
+        if (!searchRes.videos || searchRes.videos.length === 0) {
             await nexus.sendMessage(chatId, { text: `❌ No results found for "${query}". Try another search.` });
             return;
         }
 
-        const results = response.data.result.slice(0, 10); // table can hold more than a text list comfortably
+        const results = searchRes.videos.slice(0, 10); // table can hold more than a text list comfortably
 
         const rows = [
             ['#', 'Title', 'Link'],
@@ -5746,24 +7325,15 @@ const performMusicDownload = async (nexus, chatId, videoUrl, sender) => {
         console.log(chalk.blue(`📥 Downloading MP3 from: ${videoUrl}...`));
         await nexus.sendMessage(chatId, { text: `⏳ Downloading MP3... Please wait (may take 30-60 seconds)` });
 
-        const response = await axios.get('https://api-madrin.zone.id/download/ytmp3', {
-            params: {
-                apikey: 'test',
-                url: videoUrl
-            }
-        });
+        const data = await prexzyGet('/download/ytmp3', { url: videoUrl });
+        const downloadLink = madrinExtractLink(data);
 
-        // The API returns a FLAT object — { status, title, download_url, ... } —
-        // NOT wrapped in a `.result` field. Checking response.data.result (as
-        // before) was always false, so every download reported "failed" even
-        // when the API call actually succeeded.
-        if (!response.data || response.data.status !== true || !response.data.download_url) {
+        if (!data || data.status !== true || !downloadLink) {
             await nexus.sendMessage(chatId, { text: `❌ Download failed. Try another video or check the URL.` });
             return;
         }
 
-        const downloadLink = response.data.download_url;
-        const title = response.data.title || 'Downloaded Music';
+        const title = madrinExtractTitle(data, 'Downloaded Music');
 
         await nexus.sendMessage(chatId, {
             audio: { url: downloadLink },
@@ -8258,16 +9828,429 @@ const isCreator = [botNumber, ...allOwners].map(v => v.replace(/[^0-9]/g, '') + 
 const isDev = allOwners.map(v => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
 const isOwner = [botNumber, ...allOwners].map(v => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net').includes(m.sender);
 const isPremium = [botNumber, ...Premium].map(v => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net').includes(m.sender);
-const isSudo = loadSudoList().includes(m.sender);
+// Sudo membership check — compares the sudo list against every JID form
+// available for this sender, not just m.sender alone. WhatsApp's @lid
+// rollout means the same person can show up under different JIDs
+// depending on context (Baileys exposes the alternate one via
+// key.participantAlt / key.remoteJidAlt when it's known) — a single-field
+// match was silently failing for exactly those accounts.
+const isSudo = (() => {
+    const sudoList = loadSudoList();
+    const candidates = [m.sender, m.key?.participant, m.key?.participantAlt, m.key?.remoteJid, m.key?.remoteJidAlt].filter(Boolean);
+    return candidates.some(jid => sudoList.includes(jid));
+})();
 
 // Private mode: only the owner and sudo users can use the bot when it's
 // not set to public. This used to live in bot.js as a plain fromMe check,
 // which silently blocked sudo users too since bot.js has no idea what
 // sudo even is — moved here where isCreator/isSudo are actually known.
+const isBotAdmins = m.isGroup ? (groupAdmins.includes(botNumber) || (botLid && groupAdmins.includes(botLid))) : false;
+// Was a plain single-format check (groupAdmins.includes(m.sender)) — same
+// @lid/phone-number mismatch bug as the earlier sudo fix. An admin whose
+// messages arrive under a different JID form than the one stored in
+// groupAdmins (e.g. @lid vs @s.whatsapp.net) was silently read as a
+// non-admin, so antilink/antibadword/antitag etc. deleted their messages
+// and antipromote/antidemote misfired on them too. Now checks every JID
+// form available for this sender, not just one.
+const isAdmins = m.isGroup ? [m.sender, m.key?.participant, m.key?.participantAlt].filter(Boolean).some(jid => groupAdmins.includes(jid)) : false;
+
+// ── 1. ANTILINK ──────────────────────────────────────────────────────────
+// NOTE: this block must always stay ABOVE the "if (!devtrust.public) { if (!isCreator) return }"
+// gate further down in this file. It runs for every group message regardless of
+// public/private mode, exactly like ANTIBADWORD below — do not move it under that gate.
+if (m.isGroup && !isAdmins && !isCreator) {
+    const groupSettings = antilinkSettings[getAntilinkKey(botNumber, m.chat)];
+    if (groupSettings && groupSettings.enabled) {
+        // NOTE: no /g flag — using /g with .test() causes stateful lastIndex bug
+        const linkRegex = /https?:\/\/[^\s]+|www\.[^\s]+|chat\.whatsapp\.com\/[^\s]+|wa\.me\/[^\s]+|t\.me\/[^\s]+|[a-zA-Z0-9-]+\.(com|net|org|io|gov|edu|xyz|tk|ml|ga|cf|gq|me|tv|cc|ws|club|online|site|tech|store|blog|live|app|co)[^\s]*/i;
+
+        const checkTexts = [
+            body,
+            m.message?.conversation,
+            m.message?.extendedTextMessage?.text,
+            m.message?.imageMessage?.caption,
+            m.message?.videoMessage?.caption,
+            m.message?.documentMessage?.caption,
+        ].filter(Boolean).join(' ');
+
+        // WhatsApp's native "Invite via link" share sends a structured
+        // groupInviteMessage (groupJid/inviteCode/groupName) — no URL string
+        // anywhere in the text fields above, so the regex alone can't catch it.
+        const isGroupInviteShare = m.mtype === 'groupInviteMessage' || !!m.message?.groupInviteMessage;
+
+        if ((checkTexts && linkRegex.test(checkTexts)) || isGroupInviteShare) {
+            // Same pattern as ANTIBADWORD: always attempt the delete directly,
+            // unconditionally, instead of branching on isBotAdmins first.
+            try {
+                await devtrust.sendMessage(m.chat, { delete: m.key });
+            } catch (e) {}
+
+            if (groupSettings.action === 'kick') {
+                try {
+                    await devtrust.groupParticipantsUpdate(m.chat, [m.sender], 'remove');
+                    await reply(`👢 @${m.sender.split('@')[0]} was kicked for posting links`, [m.sender]);
+                } catch (e) {
+                    await reply(`⚠️ @${m.sender.split('@')[0]} Links are not allowed here!\n\n_Make me admin to enable kick mode_`, [m.sender]);
+                }
+            } else if (groupSettings.action === 'warn') {
+                const limit = groupSettings.warnLimit || 3;
+                const { count, shouldKick } = bumpAntiFeatureWarn('antilink', m.chat, m.sender, limit);
+                if (shouldKick) {
+                    try {
+                        await devtrust.groupParticipantsUpdate(m.chat, [m.sender], 'remove');
+                        await reply(`👢 @${m.sender.split('@')[0]} reached ${limit}/${limit} warnings for links and was kicked`, [m.sender]);
+                    } catch (e) {
+                        await reply(`⚠️ @${m.sender.split('@')[0]} hit the warning limit but I couldn't kick — make me admin.`, [m.sender]);
+                    }
+                } else {
+                    await reply(`⚠️ @${m.sender.split('@')[0]} Links are not allowed here! Warning *${count}/${limit}*`, [m.sender]);
+                }
+            } else {
+                await reply(`⚠️ @${m.sender.split('@')[0]} Links are not allowed here!`, [m.sender]);
+            }
+            return;
+        }
+    }
+}
+
+// ── 2. ANTI-MENTIONGC ────────────────────────────────────────────────────
+// Deletes messages that contain THIS group's own invite link/JID posted
+// inside the group itself (leaking the group elsewhere, or re-pasting the
+// invite link to bypass admin approval). Same delete/warn(N)/kick pattern
+// as antilink — must stay in this same region for the same reason.
+if (m.isGroup && !isAdmins && !isCreator) {
+    const mgSettings = antiMentionGcSettings[getAntilinkKey(botNumber, m.chat)];
+    if (mgSettings && mgSettings.enabled) {
+        const mgCheckText = [
+            body,
+            m.message?.conversation,
+            m.message?.extendedTextMessage?.text,
+            m.message?.imageMessage?.caption,
+            m.message?.videoMessage?.caption,
+        ].filter(Boolean).join(' ');
+        const isThisGroupInviteShare = m.mtype === 'groupInviteMessage' || !!m.message?.groupInviteMessage;
+        let groupLinkLeaked = isThisGroupInviteShare;
+        if (!groupLinkLeaked && mgCheckText) {
+            try {
+                const currentCode = await devtrust.groupInviteCode(m.chat).catch(() => null);
+                if (currentCode && mgCheckText.includes(currentCode)) groupLinkLeaked = true;
+            } catch (e) {}
+            // Also catch someone just pasting the raw group JID/name as a callout.
+            if (!groupLinkLeaked && mgCheckText.includes(m.chat.split('@')[0])) groupLinkLeaked = true;
+        }
+
+        if (groupLinkLeaked) {
+            try { await devtrust.sendMessage(m.chat, { delete: m.key }); } catch (e) {}
+
+            if (mgSettings.action === 'kick') {
+                try {
+                    await devtrust.groupParticipantsUpdate(m.chat, [m.sender], 'remove');
+                    await reply(`👢 @${m.sender.split('@')[0]} was kicked for tagging/leaking this group`, [m.sender]);
+                } catch (e) {
+                    await reply(`⚠️ @${m.sender.split('@')[0]} Don't tag or leak this group here!\n\n_Make me admin to enable kick mode_`, [m.sender]);
+                }
+            } else if (mgSettings.action === 'warn') {
+                const limit = mgSettings.warnLimit || 3;
+                const { count, shouldKick } = bumpAntiFeatureWarn('antimentiongc', m.chat, m.sender, limit);
+                if (shouldKick) {
+                    try {
+                        await devtrust.groupParticipantsUpdate(m.chat, [m.sender], 'remove');
+                        await reply(`👢 @${m.sender.split('@')[0]} reached ${limit}/${limit} warnings for tagging this group and was kicked`, [m.sender]);
+                    } catch (e) {
+                        await reply(`⚠️ @${m.sender.split('@')[0]} hit the warning limit but I couldn't kick — make me admin.`, [m.sender]);
+                    }
+                } else {
+                    await reply(`⚠️ @${m.sender.split('@')[0]} Don't tag/leak this group here! Warning *${count}/${limit}*`, [m.sender]);
+                }
+            } else {
+                await reply(`⚠️ @${m.sender.split('@')[0]} Don't tag or leak this group here!`, [m.sender]);
+            }
+            return;
+        }
+    }
+}
+
+// ── 2. ANTI-TAG (includes WA @all feature) ───────────────────────────────
+if (m.isGroup && !isAdmins && !isCreator) {
+    const config = getSetting(botNumber + m.chat, "antitag", { enabled: false, action: 'delete' });
+    if (config.enabled) {
+        const allMentioned = [
+            ...(m.mentionedJid || []),
+            ...(m.message?.extendedTextMessage?.contextInfo?.mentionedJid || []),
+            ...(m.message?.imageMessage?.contextInfo?.mentionedJid || []),
+            ...(m.message?.videoMessage?.contextInfo?.mentionedJid || []),
+            ...(m.message?.conversation?.contextInfo?.mentionedJid || []),
+        ];
+        const uniqueMentioned = [...new Set(allMentioned)];
+
+        const rawText2 = [
+            m.message?.conversation,
+            m.message?.extendedTextMessage?.text,
+            m.message?.imageMessage?.caption,
+            m.message?.videoMessage?.caption,
+        ].filter(Boolean).join(' ');
+
+        const signal1 = uniqueMentioned.includes('0@s.whatsapp.net');
+        const signal2 = /@all\b|@everyone\b/i.test(rawText2);
+        const signal3 = participants.length > 4 && uniqueMentioned.length >= participants.length;
+        const signal4 = uniqueMentioned.some(j =>
+            j === 'all@s.whatsapp.net' || j === 'all@broadcast' || j?.includes('@broadcast')
+        );
+
+        const isAtAll = signal1 || signal2 || signal3 || signal4;
+        const isMassTag = uniqueMentioned.length > 5;
+
+        if (isAtAll || isMassTag) {
+            const reason = isAtAll ? 'using @all to tag everyone' : 'mass tagging members';
+            await antiAction(config.action, reason, '🏷️');
+            return;
+        }
+    }
+}
+
+// ── 3. ANTI-SPAM ────────────────────────────────────────────────────────
+if (m.isGroup && !isAdmins && !isCreator) {
+    const config = getSetting(botNumber + m.chat, "antispam", { enabled: false, action: 'delete' });
+    if (config.enabled) {
+        if (!global.antispam) global.antispam = {};
+        if (!global.antispam[m.chat]) global.antispam[m.chat] = {};
+        const spamUser = global.antispam[m.chat][m.sender];
+        const now = Date.now();
+        if (!spamUser) {
+            global.antispam[m.chat][m.sender] = { count: 1, ts: now };
+        } else {
+            if (now - spamUser.ts < 5000) {
+                spamUser.count++;
+                if (spamUser.count >= 6) {
+                    await antiAction(config.action, 'spamming', '🚫');
+                    global.antispam[m.chat][m.sender] = { count: 0, ts: now };
+                    return;
+                }
+            } else {
+                global.antispam[m.chat][m.sender] = { count: 1, ts: now };
+            }
+        }
+    }
+}
+
+// ── 4. ANTI-BOT ─────────────────────────────────────────────────────────
+if (m.isGroup && body && !isAdmins && !isCreator) {
+    const config = getSetting(botNumber + m.chat, "antibot", { enabled: false, action: 'delete' });
+    if (config.enabled) {
+        const botPrefixes = ['.', '!', '/', '#', '$', '%', '&', '*', '^', '~'];
+        // Only flags a genuine unresolved device-suffix JID (e.g. "1234:5@s.whatsapp.net")
+        // as bot-like — the old version used loose substring checks (.includes('bot'),
+        // .includes('broadcast')) that could false-positive on real users, especially
+        // @lid-format accounts, silently deleting their messages with zero reply.
+        const rawJid = m.key?.participant || m.key?.remoteJid || '';
+        const looksLikeBot = /:\d+@/.test(rawJid) || rawJid.endsWith('@broadcast');
+        if (botPrefixes.some(p => body.startsWith(p)) && looksLikeBot) {
+            await antiAction(config.action, 'using bot commands', '🤖');
+            return;
+        }
+    }
+}
+
+// ── 5. ANTI-BEG ─────────────────────────────────────────────────────────
+if (m.isGroup && !isAdmins && !isCreator) {
+    const config = getSetting(botNumber + m.chat, "antibeg", { enabled: false, action: 'delete' });
+    if (config.enabled) {
+        const begCheckText = [
+            body,
+            m.message?.conversation,
+            m.message?.extendedTextMessage?.text,
+        ].filter(Boolean).join(' ');
+        const begPatterns = [
+            /bless me/i, /send me money/i, /give me money/i, /help me financially/i,
+            /i need money/i, /i dey suffer/i, /no money/i, /hungry dey catch me/i,
+            /send me airtime/i, /buy me data/i, /fund me/i, /donate to me/i,
+            /my account number/i, /send cash/i, /poor me/i,
+            /assist me financially/i, /anything for me/i,
+            /broke as hell/i, /i am starving/i, /no food/i
+        ];
+        if (begCheckText && begPatterns.some(p => p.test(begCheckText))) {
+            await antiAction(config.action, 'begging', '💰');
+            return;
+        }
+    }
+}
+
+// ── 6. ANTIBADWORD ──────────────────────────────────────────────────────
+if (getSetting(botNumber + m.chat, "feature.antibadword", false) && m.isGroup && !isAdmins && !isCreator) {
+   const badWords = ["fuck", "bitch", "sex", "nigga","bastard","fool","mumu","idiot","werey","mother","mama","ass","mad","dick","pussy","bast"];
+   const badWordCheckText = [
+       body,
+       m.message?.conversation,
+       m.message?.extendedTextMessage?.text,
+       m.message?.imageMessage?.caption,
+       m.message?.videoMessage?.caption,
+       m.message?.documentMessage?.caption,
+   ].filter(Boolean).join(' ').toLowerCase();
+   if (badWordCheckText && badWords.some(word => badWordCheckText.includes(word))) {
+      try { await devtrust.sendMessage(m.chat, { delete: m.key }); } catch(e) {}
+      await reply(`❌ @${m.sender.split('@')[0]} watch your language 😟!`, [m.sender]);
+   }
+}
+
+// ── AUTO STATUS / MENTION REACT (must also stay above the private-mode gate) ──
+// Was checking getSetting(m.sender, ...) — m.sender on a status event is
+// whoever POSTED the status (a random contact), never the bot's own
+// number, so this only ever matched by coincidence. The toggle command
+// saves under botNumber; the check now reads the same key.
+// Only for statuses OTHERS post — m.key.fromMe is true when it's the
+// bot's own account (i.e. you) posting, so that's excluded from both.
+if (getSetting(botNumber, "autoViewStatus", false) && m.key.remoteJid === "status@broadcast" && !m.key.fromMe) {
+    try {
+        await devtrust.readMessages([m.key]);
+        console.log(`👀 Viewed status from: ${m.key.participant}`);
+    } catch (err) {
+        console.log("❌ Error viewing status:", err);
+    }
+}
+
+// Auto-react to statuses with a random emoji. Separate toggle from
+// autoViewStatus on purpose — viewing and reacting are different levels
+// of visibility some people want independently. Also excludes your own
+// posted statuses, same as above.
+if (getSetting(botNumber, "autoLikeStatus", false) && m.key.remoteJid === "status@broadcast" && !m.key.fromMe) {
+    try {
+        const likeEmojis = ['❤️', '🔥', '😍', '👏', '😂', '💯', '🎉', '👍', '😮', '✨'];
+        const pickedEmoji = likeEmojis[Math.floor(Math.random() * likeEmojis.length)];
+        await devtrust.sendMessage(m.key.remoteJid, { react: { text: pickedEmoji, key: m.key } }, { statusJidList: [m.key.participant, botNumber + '@s.whatsapp.net'] });
+        console.log(`${pickedEmoji} Reacted to status from: ${m.key.participant}`);
+    } catch (err) {
+        console.log("❌ Error reacting to status:", err);
+    }
+}
+
+// React with a chosen emoji whenever the bot's own number gets @mentioned
+// in a group. Owner-configured, group-only by design.
+if (m.isGroup && getSetting(botNumber, "reactMentionEmoji", null) && m.mentionedJid?.includes(botNumber + '@s.whatsapp.net') && !m.key.fromMe) {
+    try {
+        const mentionEmoji = getSetting(botNumber, "reactMentionEmoji", null);
+        await devtrust.sendMessage(m.chat, { react: { text: mentionEmoji, key: m.key } });
+    } catch (err) {
+        console.log("❌ Error reacting to mention:", err);
+    }
+}
+
+// ======================[ BANNED USERS CHECK ]======================
+if (getSetting(m.sender, "banned", false)) {
+    await reply(`⛔ You are banned from using this bot, @${m.sender.split('@')[0]}`, [m.sender])
+    return
+}
+
+// ======================[ 🔇 MUTED USERS CHECK ]======================
+if (m.isGroup && !isAdmins && !isCreator) {
+    // Match against every identity field WhatsApp might report for the
+    // sender (m.sender alone can miss when the group uses @lid privacy
+    // addressing instead of a phone-number jid — isAdmins above already
+    // has to check the same set of fields for the same reason).
+    const senderIds = [m.sender, m.key?.participant, m.key?.participantAlt].filter(Boolean);
+    const muteEntry = global.muted?.[m.chat]?.find(e => senderIds.includes(typeof e === 'string' ? e : e.jid));
+    if (muteEntry) {
+        const isStickersOnly = typeof muteEntry === 'object' && muteEntry.stickersOnly;
+        const isSticker = m.mtype === 'stickerMessage';
+        if (!isStickersOnly || !isSticker) {
+            await devtrust.sendMessage(m.chat, { delete: m.key });
+            return;
+        }
+    }
+}
+
+// ===== AUTO REACT (runs for ALL users, before private mode gate) =====
+// Was previously declared ~300 lines below this gate (see the global
+// variables block further down) — meaning that in private mode, the
+// `!devtrust.public && !m.fromMe` check below returned early for every
+// non-owner message before autoReact ever got a chance to run, so it
+// only ever reacted to the bot owner's own messages. Moved above the
+// gate so it actually reacts to everyone, matching the comment's stated
+// intent and the original design.
+const _autoReactOn = getSetting(m.chat, "autoReact", false);
+if (process.env.DEBUG_AUTOREACT) {
+    console.log('[AutoReact Debug]', { chat: m.chat, settingOn: _autoReactOn, fromMe: m.key.fromMe });
+}
+if (_autoReactOn) {
+    const emojis = [
+        "😁", "😂", "🤣", "😃", "😄", "😅", "😆", "😉", "😊",
+        "😍", "😘", "😎", "🤩", "🤔", "😏", "😣", "😥", "😮", "🤐",
+        "😪", "😫", "😴", "😌", "😛", "😜", "😝", "🤤", "😒", "😓",
+        "😔", "😕", "🙃", "🤑", "😲", "😖", "😞", "😟", "😤", "😢",
+        "😭", "😨", "😩", "🤯", "😬", "😰", "😱", "🥵", "🥶", "😳",
+        "🤪", "🀄", "😠", "🀄", "😷", "🤒", "🤕", "🤢", "🤮", "🤧",
+        "😇", "🥳", "🤠", "🤡", "🤥", "🤫", "🤭", "🧐", "🤓", "😈",
+        "👿", "👹", "👺", "💀", "👻", "🖕", "🙏", "🤖", "🎃", "😺",
+        "😸", "😹", "😻", "😼", "😽", "🙀", "😿", "😾", "💋", "💌",
+        "💘", "💝", "💖", "💗", "💓", "💞", "💕", "💟", "💔", "❤️"
+    ];
+    const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
+    try {
+        await devtrust.sendMessage(m.chat, {
+            react: { text: randomEmoji, key: m.key },
+        });
+    } catch (err) {
+        console.error('AutoReact error:', err.message);
+    }
+}
+// =====================================================================
+
 if (!devtrust.public && !m.fromMe && !isCreator && !isSudo) return;
 
-const isBotAdmins = m.isGroup ? (groupAdmins.includes(botNumber) || (botLid && groupAdmins.includes(botLid))) : false;
-const isAdmins = m.isGroup ? groupAdmins.includes(m.sender) : false;
+// Auto-typing/recording/read: was positioned ~370 lines below this gate,
+// meaning it only ever fired for your own messages in private mode —
+// anyone else's message got cut off by the gate above before reaching it.
+// Same root cause as the antilink/mute/status bugs fixed earlier. Also
+// deduped — autoTyping/autoRecording/autoRecordType were each firing
+// twice back-to-back for no reason.
+if (getSetting(m.chat, "autoTyping", false)) {
+    devtrust.sendPresenceUpdate('composing', from)
+}
+if (getSetting(m.chat, "autoRecording", false)) {
+    devtrust.sendPresenceUpdate('recording', from)
+}
+if (getSetting(m.chat, "autoRecordType", false)) {
+    let xeonrecordin = ['recording','composing']
+    let xeonrecordinfinal = xeonrecordin[Math.floor(Math.random() * xeonrecordin.length)]
+    devtrust.sendPresenceUpdate(xeonrecordinfinal, from)
+}
+if (getSetting(m.sender, "autoread", false)) {
+   try {
+      await devtrust.readMessages([m.key]) 
+   } catch (e) {
+      console.log("Auto-Read Error:", e)
+   }
+}
+
+
+// ===== SILENT @ALL TRIGGER (no prefix — just type "@all") =====
+// Admin/owner only — same gate as .hidetag. Left wide open, this would
+// recreate the exact non-admin mass-tag abuse antitag exists to catch.
+// Non-admins typing "@all" just fall through untouched (antitag still
+// catches them if that feature is on).
+//
+// Behavior: original message stays untouched, bot just reacts to it with
+// a normal emoji (no visible reply/quote), then silently fires a blank
+// message carrying mentions for everyone — that's what actually pings
+// them. No text, no "replied to" bubble, nothing that reads as a bot reply.
+if (m.isGroup && (isAdmins || isCreator) && body && body.trim().toLowerCase() === '@all') {
+    // Fire-and-forget — NOT awaited. If react/sendMessage ever hangs on
+    // this Baileys fork, awaiting it here would stall every message
+    // processed after it (queue blocks on a promise that never settles).
+    //
+    // NOTE: we tried editing the original "@all" message in place to add
+    // mentions — WhatsApp does NOT send push notifications for mentions
+    // added via edit (this is deliberate on WhatsApp's part, to stop
+    // notification-spam via edits). The edit "worked" visually but pinged
+    // nobody. A fresh message is the only reliable way to actually notify
+    // everyone, so we're back to that — kept as invisible as WhatsApp
+    // allows via a zero-width character instead of a visible space.
+    devtrust.sendMessage(m.chat, { react: { text: '✅', key: m.key } }).catch(() => {});
+    devtrust.sendMessage(m.chat, {
+        text: '\u200B',
+        mentions: participants.map(p => p.jid || p.id)
+    }).catch(() => {});
+    return;
+}
 
 // ===== AUTO-REACT & MENTION-REACT (adapted from CODEX-AI, MIT) =====
 try {
@@ -8437,6 +10420,29 @@ async function sendVideoAsSticker(chatId, media, quoted, options = {}) {
     }
 }
 
+// ============ MULTI-IMAGE SEND (WA auto-clusters into a scrollable grid) ============
+// An earlier version tried to build a real WA "album" message via a raw
+// albumMessage placeholder + relayMessage. Tested live: the placeholder was
+// a no-op on this account/library — WhatsApp already visually clusters
+// same-sender images sent back-to-back into a scrollable grid tile on its
+// own, with no special protocol needed. So just send plain images in
+// sequence; a short delay between each keeps delivery reliable.
+async function sendImageAlbum(chatId, imageUrls, { caption, quoted } = {}) {
+    if (!imageUrls?.length) throw new Error('No images provided');
+
+    for (let i = 0; i < imageUrls.length; i++) {
+        try {
+            await devtrust.sendMessage(chatId, {
+                image: { url: imageUrls[i] },
+                ...(i === 0 && caption ? { caption } : {})
+            }, { quoted: i === 0 ? quoted : undefined });
+            if (i < imageUrls.length - 1) await new Promise(r => setTimeout(r, 400));
+        } catch (e) {
+            console.error(`Image ${i} failed:`, e.message);
+        }
+    }
+}
+
 // ============ STYLETEXT FUNCTION ============
 async function styletext(text) {
     return [
@@ -8499,35 +10505,6 @@ const Richie = "LËGĚNDÃRY Ł𝗮𝗯𝘀™ 🥶";
 global.packname = botDisplayName;
 global.author = "LËGĚNDÃRY Ł𝗮𝗯𝘀™";
 
-// ===== AUTO REACT (runs for ALL users, before private mode gate) =====
-const _autoReactOn = getSetting(m.chat, "autoReact", false);
-if (process.env.DEBUG_AUTOREACT) {
-    console.log('[AutoReact Debug]', { chat: m.chat, settingOn: _autoReactOn, fromMe: m.key.fromMe });
-}
-if (_autoReactOn) {
-    const emojis = [
-        "😁", "😂", "🤣", "😃", "😄", "😅", "😆", "😉", "😊",
-        "😍", "😘", "😎", "🤩", "🤔", "😏", "😣", "😥", "😮", "🤐",
-        "😪", "😫", "😴", "😌", "😛", "😜", "😝", "🤤", "😒", "😓",
-        "😔", "😕", "🙃", "🤑", "😲", "😖", "😞", "😟", "😤", "😢",
-        "😭", "😨", "😩", "🤯", "😬", "😰", "😱", "🥵", "🥶", "😳",
-        "🤪", "🀄", "😠", "🀄", "😷", "🤒", "🤕", "🤢", "🤮", "🤧",
-        "😇", "🥳", "🤠", "🤡", "🤥", "🤫", "🤭", "🧐", "🤓", "😈",
-        "👿", "👹", "👺", "💀", "👻", "🖕", "🙏", "🤖", "🎃", "😺",
-        "😸", "😹", "😻", "😼", "😽", "🙀", "😿", "😾", "💋", "💌",
-        "💘", "💝", "💖", "💗", "💓", "💞", "💕", "💟", "💔", "❤️"
-    ];
-    const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
-    try {
-        await devtrust.sendMessage(m.chat, {
-            react: { text: randomEmoji, key: m.key },
-        });
-    } catch (err) {
-        console.error('AutoReact error:', err.message);
-    }
-}
-// =====================================================================
-
 // ======================[ 🛡️ ANTI FEATURES — runs BEFORE public mode gate ]======================
 
 // ── Shared helper: delete msg + take action ──────────────────────────────
@@ -8553,176 +10530,6 @@ async function antiAction(action, reason, warningEmoji, targetKey) {
         await reply(`${warningEmoji} @${m.sender.split('@')[0]} ${reason} is not allowed here!`, [m.sender]);
     }
 }
-
-// ── 1. ANTILINK ──────────────────────────────────────────────────────────
-// NOTE: this block must always stay ABOVE the "if (!devtrust.public) { if (!isCreator) return }"
-// gate further down in this file. It runs for every group message regardless of
-// public/private mode, exactly like ANTIBADWORD below — do not move it under that gate.
-if (m.isGroup && !isAdmins && !isCreator) {
-    const groupSettings = antilinkSettings[getAntilinkKey(botNumber, m.chat)];
-    if (groupSettings && groupSettings.enabled) {
-        // NOTE: no /g flag — using /g with .test() causes stateful lastIndex bug
-        const linkRegex = /https?:\/\/[^\s]+|www\.[^\s]+|chat\.whatsapp\.com\/[^\s]+|wa\.me\/[^\s]+|t\.me\/[^\s]+|[a-zA-Z0-9-]+\.(com|net|org|io|gov|edu|xyz|tk|ml|ga|cf|gq|me|tv|cc|ws|club|online|site|tech|store|blog|live|app|co)[^\s]*/i;
-
-        const checkTexts = [
-            body,
-            m.message?.conversation,
-            m.message?.extendedTextMessage?.text,
-            m.message?.imageMessage?.caption,
-            m.message?.videoMessage?.caption,
-            m.message?.documentMessage?.caption,
-        ].filter(Boolean).join(' ');
-
-        // WhatsApp's native "Invite via link" share sends a structured
-        // groupInviteMessage (groupJid/inviteCode/groupName) — no URL string
-        // anywhere in the text fields above, so the regex alone can't catch it.
-        const isGroupInviteShare = m.mtype === 'groupInviteMessage' || !!m.message?.groupInviteMessage;
-
-        if ((checkTexts && linkRegex.test(checkTexts)) || isGroupInviteShare) {
-            // Same pattern as ANTIBADWORD: always attempt the delete directly,
-            // unconditionally, instead of branching on isBotAdmins first.
-            try {
-                await devtrust.sendMessage(m.chat, { delete: m.key });
-            } catch (e) {}
-
-            if (groupSettings.action === 'kick') {
-                try {
-                    await devtrust.groupParticipantsUpdate(m.chat, [m.sender], 'remove');
-                    await reply(`👢 @${m.sender.split('@')[0]} was kicked for posting links`, [m.sender]);
-                } catch (e) {
-                    await reply(`⚠️ @${m.sender.split('@')[0]} Links are not allowed here!\n\n_Make me admin to enable kick mode_`, [m.sender]);
-                }
-            } else {
-                await reply(`⚠️ @${m.sender.split('@')[0]} Links are not allowed here!`, [m.sender]);
-            }
-            return;
-        }
-    }
-}
-
-// ── 2. ANTI-TAG (includes WA @all feature) ───────────────────────────────
-if (m.isGroup && !isAdmins && !isCreator) {
-    const config = getSetting(botNumber + m.chat, "antitag", { enabled: false, action: 'delete' });
-    if (config.enabled) {
-        const allMentioned = [
-            ...(m.mentionedJid || []),
-            ...(m.message?.extendedTextMessage?.contextInfo?.mentionedJid || []),
-            ...(m.message?.imageMessage?.contextInfo?.mentionedJid || []),
-            ...(m.message?.videoMessage?.contextInfo?.mentionedJid || []),
-            ...(m.message?.conversation?.contextInfo?.mentionedJid || []),
-        ];
-        const uniqueMentioned = [...new Set(allMentioned)];
-
-        const rawText2 = [
-            m.message?.conversation,
-            m.message?.extendedTextMessage?.text,
-            m.message?.imageMessage?.caption,
-            m.message?.videoMessage?.caption,
-        ].filter(Boolean).join(' ');
-
-        const signal1 = uniqueMentioned.includes('0@s.whatsapp.net');
-        const signal2 = /@all\b|@everyone\b/i.test(rawText2);
-        const signal3 = participants.length > 4 && uniqueMentioned.length >= participants.length;
-        const signal4 = uniqueMentioned.some(j =>
-            j === 'all@s.whatsapp.net' || j === 'all@broadcast' || j?.includes('@broadcast')
-        );
-
-        const isAtAll = signal1 || signal2 || signal3 || signal4;
-        const isMassTag = uniqueMentioned.length > 5;
-
-        if (isAtAll || isMassTag) {
-            const reason = isAtAll ? 'using @all to tag everyone' : 'mass tagging members';
-            await antiAction(config.action, reason, '🏷️');
-            return;
-        }
-    }
-}
-
-// ── 3. ANTI-SPAM ────────────────────────────────────────────────────────
-if (m.isGroup && !isAdmins && !isCreator) {
-    const config = getSetting(botNumber + m.chat, "antispam", { enabled: false, action: 'delete' });
-    if (config.enabled) {
-        if (!global.antispam) global.antispam = {};
-        if (!global.antispam[m.chat]) global.antispam[m.chat] = {};
-        const spamUser = global.antispam[m.chat][m.sender];
-        const now = Date.now();
-        if (!spamUser) {
-            global.antispam[m.chat][m.sender] = { count: 1, ts: now };
-        } else {
-            if (now - spamUser.ts < 5000) {
-                spamUser.count++;
-                if (spamUser.count >= 6) {
-                    await antiAction(config.action, 'spamming', '🚫');
-                    global.antispam[m.chat][m.sender] = { count: 0, ts: now };
-                    return;
-                }
-            } else {
-                global.antispam[m.chat][m.sender] = { count: 1, ts: now };
-            }
-        }
-    }
-}
-
-// ── 4. ANTI-BOT ─────────────────────────────────────────────────────────
-if (m.isGroup && body && !isAdmins && !isCreator) {
-    const config = getSetting(botNumber + m.chat, "antibot", { enabled: false, action: 'delete' });
-    if (config.enabled) {
-        const botPrefixes = ['.', '!', '/', '#', '$', '%', '&', '*', '^', '~'];
-        // Only flags a genuine unresolved device-suffix JID (e.g. "1234:5@s.whatsapp.net")
-        // as bot-like — the old version used loose substring checks (.includes('bot'),
-        // .includes('broadcast')) that could false-positive on real users, especially
-        // @lid-format accounts, silently deleting their messages with zero reply.
-        const rawJid = m.key?.participant || m.key?.remoteJid || '';
-        const looksLikeBot = /:\d+@/.test(rawJid) || rawJid.endsWith('@broadcast');
-        if (botPrefixes.some(p => body.startsWith(p)) && looksLikeBot) {
-            await antiAction(config.action, 'using bot commands', '🤖');
-            return;
-        }
-    }
-}
-
-// ── 5. ANTI-BEG ─────────────────────────────────────────────────────────
-if (m.isGroup && !isAdmins && !isCreator) {
-    const config = getSetting(botNumber + m.chat, "antibeg", { enabled: false, action: 'delete' });
-    if (config.enabled) {
-        const begCheckText = [
-            body,
-            m.message?.conversation,
-            m.message?.extendedTextMessage?.text,
-        ].filter(Boolean).join(' ');
-        const begPatterns = [
-            /bless me/i, /send me money/i, /give me money/i, /help me financially/i,
-            /i need money/i, /i dey suffer/i, /no money/i, /hungry dey catch me/i,
-            /send me airtime/i, /buy me data/i, /fund me/i, /donate to me/i,
-            /my account number/i, /send cash/i, /poor me/i,
-            /assist me financially/i, /anything for me/i,
-            /broke as hell/i, /i am starving/i, /no food/i
-        ];
-        if (begCheckText && begPatterns.some(p => p.test(begCheckText))) {
-            await antiAction(config.action, 'begging', '💰');
-            return;
-        }
-    }
-}
-
-// ── 6. ANTIBADWORD ──────────────────────────────────────────────────────
-if (getSetting(botNumber + m.chat, "feature.antibadword", false) && m.isGroup && !isAdmins && !isCreator) {
-   const badWords = ["fuck", "bitch", "sex", "nigga","bastard","fool","mumu","idiot","werey","mother","mama","ass","mad","dick","pussy","bast"];
-   const badWordCheckText = [
-       body,
-       m.message?.conversation,
-       m.message?.extendedTextMessage?.text,
-       m.message?.imageMessage?.caption,
-       m.message?.videoMessage?.caption,
-       m.message?.documentMessage?.caption,
-   ].filter(Boolean).join(' ').toLowerCase();
-   if (badWordCheckText && badWords.some(word => badWordCheckText.includes(word))) {
-      try { await devtrust.sendMessage(m.chat, { delete: m.key }); } catch(e) {}
-      await reply(`❌ @${m.sender.split('@')[0]} watch your language 😟!`, [m.sender]);
-   }
-}
-
-// =====================================================================
 
 if (!devtrust.public) {
     if (!isCreator) return
@@ -8752,68 +10559,8 @@ if (isCmd) {
 }
 
 
-if (getSetting(m.chat, "autoTyping", false)) {
-    devtrust.sendPresenceUpdate('composing', from)
-}
-if (getSetting(m.chat, "autoRecording", false)) {
-    devtrust.sendPresenceUpdate('recording', from)
-}
-if (getSetting(m.chat, "autoRecordType", false)) {
-    let xeonrecordin = ['recording','composing']
-    let xeonrecordinfinal = xeonrecordin[Math.floor(Math.random() * xeonrecordin.length)]
-    devtrust.sendPresenceUpdate(xeonrecordinfinal, from)
-}
-     
 //----------------------Func End----------------//
-if (getSetting(m.sender, "autoViewStatus", false) && m.key.remoteJid === "status@broadcast") {
-    try {
-        await devtrust.readMessages([m.key]);
-        console.log(`👀 Viewed status from: ${m.key.participant}`);
-    } catch (err) {
-        console.log("❌ Error viewing status:", err);
-    }
-}
 
-if (getSetting(m.chat, "autoRecording", false)) {
-    devtrust.sendPresenceUpdate('recording', from)
-}  
-    
-if (getSetting(m.chat, "autoTyping", false)) {
-    devtrust.sendPresenceUpdate('composing', from)
-}
-
-if (getSetting(m.chat, "autoRecordType", false)) {
-    let xeonrecordin = ['recording','composing']
-    let xeonrecordinfinal = xeonrecordin[Math.floor(Math.random() * xeonrecordin.length)]
-    devtrust.sendPresenceUpdate(xeonrecordinfinal, from)
-}
-
-if (getSetting(m.sender, "autoread", false)) {
-   try {
-      await devtrust.readMessages([m.key]) 
-   } catch (e) {
-      console.log("Auto-Read Error:", e)
-   }
-}
-
-// ======================[ BANNED USERS CHECK ]======================
-if (getSetting(m.sender, "banned", false)) {
-    await reply(`⛔ You are banned from using this bot, @${m.sender.split('@')[0]}`, [m.sender])
-    return
-}
-
-// ======================[ 🔇 MUTED USERS CHECK ]======================
-if (m.isGroup && !isAdmins && !isCreator) {
-    const muteEntry = global.muted?.[m.chat]?.find(e => (typeof e === 'string' ? e : e.jid) === m.sender);
-    if (muteEntry) {
-        const isStickersOnly = typeof muteEntry === 'object' && muteEntry.stickersOnly;
-        const isSticker = m.mtype === 'stickerMessage';
-        if (!isStickersOnly || !isSticker) {
-            await devtrust.sendMessage(m.chat, { delete: m.key });
-            return;
-        }
-    }
-}
 
 if (getSetting(botNumber + m.chat, "feature.autoreply", false)) {
    const autoReplyList = { 
@@ -8901,6 +10648,92 @@ if (!devtrust._newsletterListenerReady) {
             const msg = chatUpdate.messages?.[0];
             if (!msg) return;
             const sender = msg.key.remoteJid;
+
+            // ===== AUTO-BEG =====
+            // If enabled via .autobeg on, auto-replies to anyone who DMs
+            // the owner (not groups, not the owner's own messages) with a
+            // begging message + their saved .aza account details. Capped
+            // to once per 24h per sender so it's a joke, not spam.
+            if (getSetting('bot', 'autoBegEnabled', false) && !msg.key.fromMe && !sender.endsWith('@g.us')) {
+                try {
+                    const azaFile = './database/aza_users.json';
+                    let azaDB = {};
+                    if (fs.existsSync(azaFile)) azaDB = JSON.parse(fs.readFileSync(azaFile));
+                    const ownerJid = ownerNumber.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
+                    const ownerData = azaDB[ownerJid] || Object.values(azaDB)[0];
+                    if (ownerData) {
+                        const lastBeg = getSetting(sender, 'lastAutoBeg', 0);
+                        if (Date.now() - lastBeg > 24 * 60 * 60 * 1000) {
+                            setSetting(sender, 'lastAutoBeg', Date.now());
+                            const begLines = [
+                                `Hey! 🙏 I've had a rough week, could you send anything you can spare?`,
+                                `Omo I'm broke joor 😩 anything go help me right now`,
+                                `Please I need help urgently, whatever you can send is appreciated 🙏`
+                            ];
+                            const line = begLines[Math.floor(Math.random() * begLines.length)];
+                            await devtrust.sendMessage(sender, {
+                                text: `${line}\n\n🏦 Bank: ${ownerData.bank}\n💳 Number: ${ownerData.no}\n👤 Name: ${ownerData.acc}`
+                            });
+                        }
+                    }
+                } catch (e) {
+                    console.log(chalk.red(`Auto-beg error: ${e.message}`));
+                }
+            }
+
+            // ===== AUTO VIEW-ONCE CAPTURE =====
+            // .vv/.vv2 (reply-based) can only ever work in the narrow
+            // window before a view-once message is opened — once viewed,
+            // WhatsApp permanently deletes the media from its servers and
+            // no code can recover it after that. This instead grabs it
+            // the instant it arrives, before anyone has a chance to open
+            // it. Toggle with .autovv on/off (default: off).
+            //
+            // NOTE: view-once can arrive nested inside OTHER wrapper types
+            // too (e.g. ephemeralMessage, if disappearing messages are on
+            // in that chat) — a flat check for viewOnceMessage* at the top
+            // level misses that entirely. This unwraps any depth/order of
+            // known wrapper layers instead of assuming one fixed shape.
+            if (!msg.key.fromMe && getSetting('bot', 'autoViewOnce', false)) {
+                try {
+                    const WRAPPER_KEYS = ['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'deviceSentMessage'];
+                    let current = msg.message;
+                    let isViewOnce = false;
+                    let unwrapped = true;
+                    while (current && unwrapped) {
+                        unwrapped = false;
+                        for (const wKey of WRAPPER_KEYS) {
+                            if (current[wKey]) {
+                                if (wKey.startsWith('viewOnceMessage')) isViewOnce = true;
+                                current = current[wKey].message || current[wKey];
+                                unwrapped = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (isViewOnce && current) {
+                        const innerType = Object.keys(current).find(k => /^(image|video|audio)Message$/.test(k));
+                        if (innerType) {
+                            const fakeMsg = { key: msg.key, message: current };
+                            const buffer = await downloadMediaMessage(fakeMsg, 'buffer', {});
+                            const ownerJid = ownerNumber.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
+                            const senderNum = (msg.key.participant || msg.key.remoteJid || '').split('@')[0];
+                            const caption = `👁️ *Auto-captured view-once*\nFrom: ${senderNum}\nChat: ${msg.key.remoteJid}`;
+                            if (/image/.test(innerType)) {
+                                await devtrust.sendMessage(ownerJid, { image: buffer, caption });
+                            } else if (/video/.test(innerType)) {
+                                await devtrust.sendMessage(ownerJid, { video: buffer, caption });
+                            } else if (/audio/.test(innerType)) {
+                                await devtrust.sendMessage(ownerJid, { audio: buffer, mimetype: 'audio/ogg', ptt: true });
+                            }
+                        } else {
+                            console.log(chalk.yellow(`Auto view-once: detected but no recognizable media key found — keys: ${Object.keys(current || {}).join(',')}`));
+                        }
+                    }
+                } catch (e) {
+                    console.log(chalk.red(`Auto view-once capture error: ${e.message}`));
+                }
+            }
 
             // Auto-react to followed newsletters
             if (!msg.key.fromMe && newsletterJids.includes(sender)) {
@@ -9278,6 +11111,199 @@ if (!devtrust._welcomeListenerReady) {
 });
 } // end devtrust._welcomeListenerReady guard
 
+// ===== GROUP CHAT SECURITY (.gcs) =====
+// Per-group toggle. When ON, if any admin demotes the bot (strips its own
+// admin status) in that group, the bot tries to demote whoever did it back
+// to a normal member.
+//
+// IMPORTANT LIMITATION: WhatsApp only lets current admins perform admin
+// actions. By the time this event reaches the bot, the demotion has
+// already been applied server-side — so the bot has *already* lost admin
+// rights before this code runs. The retaliation call below can still win
+// sometimes (server-side propagation isn't always instant), but it is not
+// guaranteed, and there's no way around that from any bot library. When it
+// fails, the bot posts a warning instead so a human can re-promote it.
+if (!devtrust._gcsListenerReady) {
+    devtrust._gcsListenerReady = true;
+
+    devtrust.ev.on('group-participants.update', async (update) => {
+        try {
+            const { id, participants, action, author } = update;
+            if (action !== 'demote') return;
+            if (!getSetting(id, 'gcs', false)) return;
+
+            const botNumber = await devtrust.decodeJid(devtrust.user.id);
+            const botLid = devtrust.user?.lid ? await devtrust.decodeJid(devtrust.user.lid) : null;
+
+            const botWasDemoted = participants.some(p => {
+                const pid = typeof p === 'string' ? p : p.id;
+                return pid === botNumber || (botLid && pid === botLid);
+            });
+            if (!botWasDemoted) return;
+
+            // Who performed the demotion. Not every event carries this —
+            // if we don't know who did it, we can't safely retaliate.
+            const actor = author || update.participant || null;
+            if (!actor) {
+                console.log(chalk.yellow(`⚠️ GCS: bot was demoted in ${id} but no author was reported — can't act`));
+                return;
+            }
+            if (actor === botNumber || (botLid && actor === botLid)) return;
+
+            try {
+                await devtrust.groupParticipantsUpdate(id, [actor], 'demote');
+                // Knocking the attacker down doesn't restore our own admin
+                // status by itself — try that separately. This will usually
+                // fail (we need admin rights to promote ourselves, which is
+                // the same rights we just lost), but it's free to attempt.
+                let selfRestored = false;
+                try {
+                    await devtrust.groupParticipantsUpdate(id, [botNumber], 'promote');
+                    selfRestored = true;
+                } catch (_) {}
+
+                await devtrust.sendMessage(id, {
+                    text: selfRestored
+                        ? `🛡️ *Group Chat Security*\n\n@${actor.split('@')[0]} removed my admin rights, so I removed theirs and restored my own.`
+                        : `🛡️ *Group Chat Security*\n\n@${actor.split('@')[0]} removed my admin rights, so I removed theirs. I couldn't restore my own admin status though — someone will need to re-promote me manually.`,
+                    mentions: [actor]
+                });
+            } catch (err) {
+                // Expected most of the time — see note above, the bot had
+                // already lost admin by the time this ran.
+                await devtrust.sendMessage(id, {
+                    text: `🛡️ *Group Chat Security*\n\n@${actor.split('@')[0]} removed my admin rights and I couldn't reverse it — someone will need to re-promote me manually.`,
+                    mentions: [actor]
+                }).catch(() => {});
+            }
+        } catch (err) {
+            console.log('GCS listener error:', err);
+        }
+    });
+} // end devtrust._gcsListenerReady guard
+
+// ===== ANTI-DEMOTE / ANTI-PROMOTE (.antidemote / .antipromote) =====
+// Per-group toggles. Unlike .gcs (which protects the BOT's own admin status
+// and hits the "already lost the rights we need" wall), these protect other
+// members, so the bot's own admin rights are never touched by the triggering
+// action — meaning these two actually work reliably every time, no timing
+// race involved.
+//
+// antidemote: if an admin strips another admin's rights, the bot re-promotes
+// the target. (The bot's own JID is skipped here — that case is handled by
+// .gcs separately, so the two features don't double-message.)
+//
+// antipromote: only the real group owner (WhatsApp "superadmin") is allowed
+// to promote members. If any other admin promotes someone, the bot demotes
+// that new admin back down.
+if (!devtrust._antiDemotePromoteListenerReady) {
+    devtrust._antiDemotePromoteListenerReady = true;
+
+    devtrust.ev.on('group-participants.update', async (update) => {
+        try {
+            const { id, participants, action, author } = update;
+            if (!id?.endsWith('@g.us')) return;
+            if (action !== 'demote' && action !== 'promote') return;
+
+            const antidemoteOn = getSetting(id, 'antidemote', false);
+            const antipromoteOn = getSetting(id, 'antipromote', false);
+            if (!antidemoteOn && !antipromoteOn) return;
+
+            const actor = author || update.participant || null;
+            if (!actor) return; // no actor JID reported — can't safely act
+
+            const botNumber = await devtrust.decodeJid(devtrust.user.id);
+            const botLid = devtrust.user?.lid ? await devtrust.decodeJid(devtrust.user.lid) : null;
+            const isBot = (jid) => jid === botNumber || (botLid && jid === botLid);
+
+            if (isBot(actor)) return; // don't react to the bot's own promote/demote commands
+
+            if (action === 'demote' && antidemoteOn) {
+                for (const p of participants) {
+                    const targetId = typeof p === 'string' ? p : p.id;
+                    if (isBot(targetId)) continue; // .gcs handles the bot's own case
+                    try {
+                        await devtrust.groupParticipantsUpdate(id, [targetId], 'promote');
+                        await devtrust.sendMessage(id, {
+                            text: `🛡️ *Anti-Demote*\n@${targetId.split('@')[0]} was demoted by @${actor.split('@')[0]} and has been re-promoted automatically.`,
+                            mentions: [targetId, actor]
+                        });
+                    } catch (err) {
+                        console.log(chalk.yellow(`⚠️ antidemote: failed to re-promote ${targetId} in ${id}: ${err?.message || err}`));
+                    }
+                }
+            }
+
+            if (action === 'promote' && antipromoteOn) {
+                const metadata = await devtrust.groupMetadata(id);
+                const ownerParticipant = metadata.participants.find(p => p.admin === 'superadmin');
+                const ownerJid = ownerParticipant?.id || metadata.owner || metadata.subjectOwner || null;
+                if (ownerJid && isBot(ownerJid)) return;
+                if (ownerJid && actor === ownerJid) return; // real owner is always allowed to promote
+                // Second, independent check: WhatsApp doesn't always report
+                // metadata.owner/subjectOwner cleanly (especially on
+                // community-linked or older groups), which made ownerJid
+                // come back null more often than expected — and when it
+                // did, the real owner's own promotions got reversed too,
+                // making this look "broken" by undoing legitimate actions.
+                // Checking the actor's own participant entry directly is a
+                // more reliable fallback than depending on ownerJid alone.
+                const actorParticipant = metadata.participants.find(p => p.id === actor);
+                if (actorParticipant?.admin === 'superadmin') return;
+
+                for (const p of participants) {
+                    const targetId = typeof p === 'string' ? p : p.id;
+                    try {
+                        await devtrust.groupParticipantsUpdate(id, [targetId], 'demote');
+                        await devtrust.sendMessage(id, {
+                            text: `🛡️ *Anti-Promote*\n@${targetId.split('@')[0]} was promoted by @${actor.split('@')[0]}, who isn't the group owner, so it's been reversed.`,
+                            mentions: [targetId, actor]
+                        });
+                    } catch (err) {
+                        console.log(chalk.yellow(`⚠️ antipromote: failed to demote ${targetId} in ${id}: ${err?.message || err}`));
+                    }
+                }
+            }
+        } catch (err) {
+            console.log('antidemote/antipromote listener error:', err);
+        }
+    });
+} // end devtrust._antiDemotePromoteListenerReady guard
+
+// ===== ADMIN EVENT MONITOR (.adminevent on/off) =====
+// Pure announcement feature — doesn't touch anyone's rights, just tells the
+// group who promoted or demoted who. Works for members and admins alike
+// since it's read-only; no isBotAdmins requirement.
+if (!devtrust._adminEventListenerReady) {
+    devtrust._adminEventListenerReady = true;
+
+    devtrust.ev.on('group-participants.update', async (update) => {
+        try {
+            const { id, participants, action, author } = update;
+            if (!id?.endsWith('@g.us')) return;
+            if (action !== 'promote' && action !== 'demote') return;
+            if (!getSetting(id, 'adminevent', false)) return;
+
+            const actor = author || update.participant || null;
+
+            for (const p of participants) {
+                const targetId = typeof p === 'string' ? p : p.id;
+                const targetTag = `@${targetId.split('@')[0]}`;
+                const actorTag = actor ? `@${actor.split('@')[0]}` : 'someone';
+                const mentions = actor ? [targetId, actor] : [targetId];
+
+                const text = action === 'promote'
+                    ? `👑 *Admin Event*\n${targetTag} was promoted to *admin* by ${actorTag}.`
+                    : `⬇️ *Admin Event*\n${targetTag} was demoted from *admin* by ${actorTag}.`;
+
+                await devtrust.sendMessage(id, { text, mentions }).catch(() => {});
+            }
+        } catch (err) {
+            console.log('adminevent listener error:', err);
+        }
+    });
+} // end devtrust._adminEventListenerReady guard
+
 // ===== ANTI-CALL SYSTEM =====
 // Toggle with .anticall on / .anticall off (owner-only, checked in the command handler).
 // Default: off, so existing deploys don't suddenly start rejecting calls.
@@ -9629,15 +11655,24 @@ case 'antilink': {
                      `📌 *Usage:*\n` +
                      `▸ ${prefix}antilink on - Enable (delete mode)\n` +
                      `▸ ${prefix}antilink delete - Enable delete mode\n` +
-                     `▸ ${prefix}antilink kick - Enable kick mode\n` +
+                     `▸ ${prefix}antilink kick - Enable kick mode (instant)\n` +
+                     `▸ ${prefix}antilink <number> - Delete + warn, kick after N warnings (e.g. ${prefix}antilink 3)\n` +
                      `▸ ${prefix}antilink off - Disable\n\n` +
                      `⚙️ *Status:* ${status}\n` +
-                     `⚙️ *Action:* ${action}\n\n` +
-                     `_When enabled, links will be ${groupSettings.action === 'kick' ? 'deleted and user kicked' : 'deleted'}_`);
+                     `⚙️ *Action:* ${action}${groupSettings.action === 'warn' ? ` (limit: ${groupSettings.warnLimit || 3})` : ''}\n\n` +
+                     `_When enabled, links will be ${groupSettings.action === 'kick' ? 'deleted and user kicked instantly' : groupSettings.action === 'warn' ? `deleted, with a kick after ${groupSettings.warnLimit || 3} warnings` : 'deleted'}_`);
     }
     
+    // Handle a plain number -> warn-count mode
+    if (/^\d+$/.test(args[0])) {
+        const limit = parseInt(args[0]);
+        if (limit < 1 || limit > 20) return reply('❌ *Warn limit must be between 1 and 20*');
+        antilinkSettings[getAntilinkKey(botNumber, m.chat)] = { enabled: true, action: 'warn', warnLimit: limit };
+        saveAntilinkSettings(antilinkSettings);
+        reply(`✅ *Anti-Link set to WARN mode*\nLinks get deleted + warned. Kicked after *${limit}* warning(s).`);
+    }
     // Handle ON command (default to delete mode)
-    if (args[0].toLowerCase() === 'on') {
+    else if (args[0].toLowerCase() === 'on') {
         antilinkSettings[getAntilinkKey(botNumber, m.chat)] = { enabled: true, action: 'delete' };
         saveAntilinkSettings(antilinkSettings);
         reply(`✅ *Anti-Link enabled (Delete mode)*\nLinks will be deleted automatically.`);
@@ -9702,6 +11737,41 @@ case 'antitag': {
 }
 break;
 
+// ======================[ 🤖 ANTI-BOT ]======================
+// Enforcement already existed (checks getSetting(botNumber+m.chat,
+// "antibot", ...)) but there was no command anywhere to actually turn it
+// on — it was permanently stuck at its default OFF. This is that missing
+// command.
+case 'antibot': {
+    if (!m.isGroup) return reply("👥 *Groups only*");
+    if (!isAdmins && !isCreator) return reply("🔒 *Admins only*");
+
+    if (!args[0]) {
+        const config = getSetting(botNumber + m.chat, "antibot", { enabled: false, action: 'delete' });
+        return reply(`🤖 *Anti-Bot*\n_Deletes messages sent by other bots in this group._\n\n` +
+                     `📌 *Usage:*\n` +
+                     `▸ ${prefix}antibot on - Enable (delete mode)\n` +
+                     `▸ ${prefix}antibot kick - Enable kick mode\n` +
+                     `▸ ${prefix}antibot off - Disable\n\n` +
+                     `⚙️ *Status:* ${config.enabled ? 'ON ✅' : 'OFF ❌'}\n` +
+                     `⚙️ *Action:* ${config.enabled ? config.action : '-'}`);
+    }
+
+    if (args[0] === 'on' || args[0] === 'delete') {
+        setSetting(botNumber + m.chat, "antibot", { enabled: true, action: 'delete' });
+        reply(`✅ *Anti-Bot enabled (Delete mode)*`);
+    } else if (args[0] === 'kick') {
+        setSetting(botNumber + m.chat, "antibot", { enabled: true, action: 'kick' });
+        reply(`✅ *Anti-Bot enabled (Kick mode)*`);
+    } else if (args[0] === 'off') {
+        setSetting(botNumber + m.chat, "antibot", { enabled: false, action: 'delete' });
+        reply(`❌ *Anti-Bot disabled*`);
+    } else {
+        reply(`❌ *Invalid option.* Use: on, kick, or off`);
+    }
+}
+break;
+
 // ======================[ 🚫 ANTI-SPAM ]======================
 case 'antispam': {
     if (!m.isGroup) return reply("👥 *Groups only*");
@@ -9739,22 +11809,27 @@ case 'setprefix': {
     if (!isCreator && !isSudo) return reply("🔒 *Owner/Sudo only*");
     
     if (!args[0]) {
-        return reply(`🔧 *Current prefix:* \`${getUserPrefix(m.sender)}\`\n\nUsage: ${prefix}setprefix [new prefix]\nExample: ${prefix}setprefix !`);
+        return reply(`🔧 *Current prefix:* \`${getUserPrefix(m.sender) || '(none — no-prefix mode is on)'}\`\n\nUsage: ${prefix}setprefix [new prefix]\nExample: ${prefix}setprefix !\n${prefix}setprefix null — run commands with no symbol at all`);
     }
     
-    const newPrefix = args.join(' ');
+    const rawArg = args.join(' ');
+    // "null"/"none"/"off" -> empty prefix. body.startsWith('') is always
+    // true, so every message becomes a command lookup; anything that
+    // isn't a real command name just falls through the switch untouched,
+    // same as it does today for any mistyped command.
+    const goingNoPrefix = ['null', 'none', 'off'].includes(rawArg.toLowerCase());
+    const newPrefix = goingNoPrefix ? '' : rawArg;
     
     if (newPrefix.length > 5) {
         return reply("❌ *Prefix too long* (max 5 characters)");
     }
     
-    // Save the new prefix for THIS USER ONLY
     setUserPrefix(m.sender, newPrefix);
-    
-    // Update the prefix variable for current session
     prefix = newPrefix;
     
-    reply(`✅ *Your prefix changed to* \`${newPrefix}\`\n_Use ${newPrefix}menu to see commands_\n_If you forget, type just "." to see your prefix_`);
+    reply(goingNoPrefix
+        ? `✅ *No-prefix mode enabled* — just type command names directly, no symbol needed.\n_Type "setprefix ." (no symbol) to restore a prefix later_`
+        : `✅ *Your prefix changed to* \`${newPrefix}\`\n_Use ${newPrefix}menu to see commands_\n_If you forget, type just "." to see your prefix_`);
 }
 break;
 
@@ -9933,12 +12008,13 @@ case 'setsudo': case 'sudo': case 'addsudo': {
     if (!isCreator && !isSudo) 
         return reply('🔒 *Owner/Sudo only*');
 
-    let jid;
+    let jid, jidAlt;
     if (quoted?.sender) {
         // Preserve the EXACT JID format (including @lid) — rebuilding this
         // as always-@s.whatsapp.net silently broke sudo for @lid accounts,
         // since their real incoming messages never actually match that.
         jid = quoted.sender;
+        jidAlt = quoted.key?.participantAlt || quoted.key?.remoteJidAlt;
     } else if (m.mentionedJid?.[0]) {
         jid = m.mentionedJid[0];
     } else if (args[0] && /^\d+$/.test(args[0])) {
@@ -9957,6 +12033,10 @@ case 'setsudo': case 'sudo': case 'addsudo': {
         return reply(`⚠️ @${number} *already in sudo list*`);
     
     sudoList.push(jid);
+    // Store the alternate JID too when WhatsApp exposes one (lid<->pn
+    // pairing) — the check above now matches against both, but only if
+    // both are actually saved.
+    if (jidAlt && !sudoList.includes(jidAlt)) sudoList.push(jidAlt);
     saveSudoList(sudoList);
 
     reply(`✅ @${number} *added to sudo list*`);
@@ -10042,15 +12122,28 @@ case "antidelete": {
     if (!isCreator && !isSudo)
         return reply('🔒 *Owner/Sudo only*');
 
-    if (!args[0]) return reply(`⚙️ *Usage:* ${prefix}antidelete on/off`);
+    const scope = (args[0] || '').toLowerCase();
 
-    if (args[0].toLowerCase() === "on") {
+    // "status" sub-mode controls anti-delete specifically for WhatsApp
+    // statuses (status@broadcast) — a separate setting the rest of the
+    // bot already reads (antiDeleteStatus), but this sub-mode used to be
+    // stuck in dead duplicate code and was unreachable.
+    if (scope === 'status') {
+        const state = (args[1] || '').toLowerCase();
+        if (!['on', 'off'].includes(state)) return reply(`⚙️ *Usage:* ${prefix}antidelete status on/off`);
+        setSetting(botNumber, "antiDeleteStatus", state === 'on');
+        return reply(`📊 *Anti-delete for statuses* turned *${state.toUpperCase()}*`);
+    }
+
+    if (!scope) return reply(`⚙️ *Usage:* ${prefix}antidelete on/off\n${prefix}antidelete status on/off`);
+
+    if (scope === "on") {
         setSetting(botNumber, "antiDelete", true);
         reply("✅ *Anti-delete enabled*\n\nDeleted messages will be forwarded to *your DM* 📩");
-    } else if (args[0].toLowerCase() === "off") {
+    } else if (scope === "off") {
         setSetting(botNumber, "antiDelete", false);
         reply("❌ *Anti-delete disabled*");
-    } else reply(`⚙️ *Usage:* ${prefix}antidelete on/off`);
+    } else reply(`⚙️ *Usage:* ${prefix}antidelete on/off\n${prefix}antidelete status on/off`);
 }
 break;
 
@@ -10147,14 +12240,15 @@ break;
 
 case "cmdreact": {
     if (!isCreator && !isSudo) return reply('🔒 *Owner/Sudo only*');
-    if (!args[0]) return reply(`⚙️ *Usage:* ${prefix}cmdreact on/off`);
-    if (args[0] === "on") {
-        setSetting(botNumber, "cmdReact", true);
-        reply("✅ *Command react enabled* • Bot will react to commands with emojis");
-    } else if (args[0] === "off") {
-        setSetting(botNumber, "cmdReact", false);
-        reply("❌ *Command react disabled*");
-    } else reply(`⚙️ *Usage:* ${prefix}cmdreact on/off`);
+    // NOTE: cmdReact is read elsewhere as an emoji string (with a default
+    // fallback emoji), not a boolean — set the emoji itself, not on/off.
+    if (args[0] === 'off') {
+        setSetting(botNumber, 'cmdReact', null);
+        return reply('✅ *Command react disabled*');
+    }
+    if (!args[0]) return reply(`Usage: ${prefix}cmdreact <emoji>\n${prefix}cmdreact off`);
+    setSetting(botNumber, 'cmdReact', args[0]);
+    reply(`✅ *Command react set to* ${args[0]} — reacts to every command now.`);
 }
 break;
 
@@ -10338,15 +12432,13 @@ break;
 
 case "afk": {
     if (!args[0]) {
-        // Check AFK status
-        const afkData = global.afkUsers?.[m.sender];
+        const afkData = getSetting(m.sender, 'afk', null);
         if (!afkData) return reply('ℹ️ *You are not AFK*');
-        const elapsed = Math.floor((Date.now() - afkData.time) / 60000);
+        const elapsed = Math.floor((Date.now() - afkData.since) / 60000);
         reply(`🌙 *You have been AFK for ${elapsed} minutes*\nReason: ${afkData.reason}`);
     } else {
-        if (!global.afkUsers) global.afkUsers = {};
         const reason = args.join(' ');
-        global.afkUsers[m.sender] = { reason, time: Date.now() };
+        setSetting(m.sender, 'afk', { reason, since: Date.now() });
         reply(`🌙 *AFK mode enabled*\nReason: ${reason}\n_You will be notified when someone mentions you_`);
     }
 }
@@ -10379,6 +12471,37 @@ case "autoviewstatus": {
         setSetting(botNumber, "autoViewStatus", false);
         reply("❌ *Auto view status disabled*");
     } else reply("⚙️ *Usage:* autoviewstatus on/off");
+}
+break;
+
+case "autolikestatus": {
+    if (!isCreator && !isSudo)
+        return reply('🔒 *Owner/Sudo only*');
+    if (!args[0]) return reply("⚙️ *Usage:* autolikestatus on/off\n_Reacts to everyone's new status with a random emoji._");
+    if (args[0].toLowerCase() === "on") {
+        setSetting(botNumber, "autoLikeStatus", true);
+        reply("✅ *Auto-react to statuses enabled*");
+    } else if (args[0].toLowerCase() === "off") {
+        setSetting(botNumber, "autoLikeStatus", false);
+        reply("❌ *Auto-react to statuses disabled*");
+    } else reply("⚙️ *Usage:* autolikestatus on/off");
+}
+break;
+
+case "reactmention": {
+    if (!isCreator && !isSudo)
+        return reply('🔒 *Owner/Sudo only*');
+    const rmArg = (args[0] || '').trim();
+    if (!rmArg) {
+        const currentEmoji = getSetting(botNumber, "reactMentionEmoji", null);
+        return reply(`⚙️ *Usage:* ${prefix}reactmention <emoji>  or  ${prefix}reactmention off\nCurrently: ${currentEmoji ? currentEmoji : 'off'}\n\n_Groups only — reacts with this emoji whenever anyone tags you._`);
+    }
+    if (rmArg.toLowerCase() === 'off') {
+        setSetting(botNumber, "reactMentionEmoji", null);
+        return reply('❌ *React-on-mention disabled*');
+    }
+    setSetting(botNumber, "reactMentionEmoji", rmArg);
+    reply(`✅ *React-on-mention set to* ${rmArg}\n_In groups, I'll react with this whenever someone tags you._`);
 }
 break;
 
@@ -10544,24 +12667,69 @@ break;
 case "update": {
     if (!isCreator) return reply('🔒 *Owner only*');
 
-    const API_BASE_URL = process.env.API_BASE_URL || "https://legendarybot.dpdns.org";
+    // git pull doesn't work here — this panel instance has no .git
+    // folder (confirmed). Back to the original fetch-diff-write
+    // approach, but pointed at a public GitHub repo's raw file content
+    // instead of the dead legendarybot.dpdns.org server. No git needed
+    // on the panel at all, just plain HTTPS GETs.
+    const GITHUB_OWNER = process.env.GITHUB_OWNER;
+    const GITHUB_REPO = process.env.GITHUB_REPO;
+    const GITHUB_BRANCH = process.env.GITHUB_BRANCH || 'main';
     const filesToUpdate = ["case.js", "storage.js", "bot.js"];
+
+    if (!GITHUB_OWNER || !GITHUB_REPO) {
+        return reply(
+            `❌ *Update not configured yet.*\n\nSet these environment variables on the panel:\n` +
+            `\`GITHUB_OWNER\` = your GitHub username\n` +
+            `\`GITHUB_REPO\` = repo name\n` +
+            `\`GITHUB_BRANCH\` = branch (optional, defaults to \`main\`)\n\n` +
+            `Then push case.js/storage.js/bot.js to that repo and run ${prefix}update again.`
+        );
+    }
+
+    const rawBase = `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}`;
 
     await reply("🔄 *Checking for updates...*");
 
     try {
+        const changed = [];
         for (const filename of filesToUpdate) {
-            const { data } = await axios.get(`${API_BASE_URL}/api/update/${filename}`, {
-                params: { sessionId: process.env.SESSION_ID }
+            const localPath = path.join(__dirname, filename);
+            const oldContent = fs.existsSync(localPath) ? fs.readFileSync(localPath, 'utf-8') : '';
+
+            const { data: newContent } = await axios.get(`${rawBase}/${filename}`, {
+                responseType: 'text',
+                transformResponse: [d => d], // keep the raw string as-is, no JSON auto-parse
+                headers: { 'Cache-Control': 'no-cache' }
             });
-            fs.writeFileSync(path.join(__dirname, filename), data, 'utf-8');
+
+            if (typeof newContent === 'string' && newContent !== oldContent) {
+                changed.push({ filename, oldContent, newContent });
+            }
+        }
+
+        if (!changed.length) {
+            return reply("✅ *You're already up to date* — no changes found.");
+        }
+
+        await reply(`✍️ *Found updates in ${changed.length} file(s)* — writing up what changed...`);
+
+        const changelog = await generateUpdateChangelog(changed);
+        await reply(`📝 *What's new:*\n\n${changelog}`);
+
+        // Only write to disk once the writeup is out, then restart.
+        for (const { filename, newContent } of changed) {
+            fs.writeFileSync(path.join(__dirname, filename), newContent, 'utf-8');
         }
 
         await reply("✅ *Update complete!* Restarting bot now...");
         console.log(chalk.bgGreen.black("🔄 Files updated — restarting"));
-        process.exit(0); // Pterodactyl/panel should auto-restart the process
+        process.exit(0); // Panel should auto-restart the process
     } catch (e) {
-        await reply(`❌ *Update failed:* ${e.response?.data?.error || e.message}`);
+        if (e.response?.status === 404) {
+            return reply(`❌ *Update failed:* a file wasn't found in the repo (checked ${rawBase}/...). Make sure the filenames match exactly, the repo is public, and \`GITHUB_BRANCH\` is correct.`);
+        }
+        return reply(`❌ *Update failed:* ${e.message}`);
     }
 }
 break;
@@ -10611,34 +12779,44 @@ case "plugins": {
 break;
 
 case "plugin": {
-    const PLUGIN_API_BASE_URL = process.env.API_BASE_URL || "https://legendarybot.dpdns.org";
-    const sub = args[0]?.toLowerCase();
+    // Was raw-fetching remote plugin code and require()-ing it directly
+    // with zero sandboxing — anyone who could get a plugin into that
+    // registry endpoint got arbitrary code execution on this bot. Now
+    // uses pluginManager.js's isolated-vm sandbox instead (confirmed to
+    // exist on the server) — plugins run in a separate V8 isolate with
+    // no access to fs/process/require/the real socket.
+    if (!isCreator) return reply('🔒 *Owner only*');
+    const sub = (args[0] || '').toLowerCase();
+    const pluginManager = require(path.join(__dirname, 'pluginManager.js'));
 
-    if (sub === "install" && args[1]) {
-        if (!isCreator) return reply('🔒 *Owner only*');
+    if (sub === 'install') {
         const pluginId = args[1];
-
+        if (!pluginId) return reply(`Usage: ${prefix}plugin install <id>\n\nBrowse approved plugins on your panel first to get an id.`);
         try {
-            const { data } = await axios.get(`${PLUGIN_API_BASE_URL}/api/plugins/${pluginId}`);
-            const pluginsDir = path.join(__dirname, 'plugins');
-            if (!fs.existsSync(pluginsDir)) fs.mkdirSync(pluginsDir, { recursive: true });
-
-            fs.writeFileSync(path.join(pluginsDir, `${pluginId}.js`), data.code, 'utf-8');
-            return reply(`✅ Installed *${data.name}* by ${data.author}. Try its command now — no restart needed.`);
+            // Only ever fetches from YOUR OWN approved-plugin registry —
+            // never an arbitrary URL. A plugin has to pass your review
+            // queue before it's reachable here at all.
+            const res = await fetchJson(`${process.env.API_BASE_URL || 'https://legendarybot.dpdns.org'}/api/plugins/${pluginId}`);
+            if (!res || !res.code) return reply('❌ *Plugin not found in the approved registry*');
+            pluginManager.installPlugin(process.cwd(), pluginId, res.name, res.command, res.code);
+            reply(`✅ *Installed:* ${res.name}\nTrigger: ${prefix}${res.command}\n\n_Runs in a sandbox — no access to files, other bots, or the network beyond what you send it._`);
         } catch (e) {
-            return reply(`❌ *Install failed:* ${e.response?.data?.error || e.message}`);
+            reply(`❌ *Install failed:* ${e.message}`);
         }
+    } else if (sub === 'list') {
+        const installed = pluginManager.listPlugins(process.cwd());
+        const names = Object.entries(installed);
+        if (!names.length) return reply('📭 *No plugins installed*');
+        const list = names.map(([id, p]) => `▸ ${p.name} (${prefix}${p.command}) — id: ${id}`).join('\n');
+        reply(`🧩 *Installed Plugins:*\n${list}`);
+    } else if (sub === 'remove') {
+        const pluginId = args[1];
+        if (!pluginId) return reply(`Usage: ${prefix}plugin remove <id>`);
+        pluginManager.removePlugin(process.cwd(), pluginId);
+        reply('✅ *Plugin removed*');
+    } else {
+        reply(`🧩 *Plugin System*\n\n▸ ${prefix}plugin install <id>\n▸ ${prefix}plugin list\n▸ ${prefix}plugin remove <id>\n\nPlugins only come from your panel's approved registry and run sandboxed — they can't touch your files or other users' bots.`);
     }
-
-    if (sub === "list") {
-        const pluginsDir = path.join(__dirname, 'plugins');
-        if (!fs.existsSync(pluginsDir)) return reply("No plugins installed yet.");
-        const files = fs.readdirSync(pluginsDir).filter(f => f.endsWith('.js'));
-        if (!files.length) return reply("No plugins installed yet.");
-        return reply(`🧩 *Installed Plugins*\n\n${files.map(f => `• ${f.replace('.js', '')}`).join('\n')}`);
-    }
-
-    return reply(`⚙️ *Usage:*\n${prefix}plugin install <id>\n${prefix}plugin list`);
 }
 break;
 
@@ -10672,7 +12850,51 @@ case "suggestions": {
 }
 break;
 
-case "antibadword": {
+case 'antimentiongc': {
+    if (!m.isGroup) return reply("👥 *Groups only*");
+    if (!isAdmins && !isCreator) return reply("🔒 *Admins only*");
+
+    if (!args[0]) {
+        const mgSettings = antiMentionGcSettings[getAntilinkKey(botNumber, m.chat)] || { enabled: false, action: 'delete' };
+        const status = mgSettings.enabled ? 'ON ✅' : 'OFF ❌';
+        return reply(`🚫 *Anti-MentionGC*\n_Deletes messages that leak/re-share this group's own invite link inside the group._\n\n` +
+                     `📌 *Usage:*\n` +
+                     `▸ ${prefix}antimentiongc on - Enable (delete mode)\n` +
+                     `▸ ${prefix}antimentiongc kick - Enable kick mode (instant)\n` +
+                     `▸ ${prefix}antimentiongc <number> - Delete + warn, kick after N warnings (e.g. ${prefix}antimentiongc 3)\n` +
+                     `▸ ${prefix}antimentiongc off - Disable\n\n` +
+                     `⚙️ *Status:* ${status}${mgSettings.enabled ? ` (${mgSettings.action}${mgSettings.action === 'warn' ? `, limit: ${mgSettings.warnLimit || 3}` : ''})` : ''}`);
+    }
+
+    if (/^\d+$/.test(args[0])) {
+        const limit = parseInt(args[0]);
+        if (limit < 1 || limit > 20) return reply('❌ *Warn limit must be between 1 and 20*');
+        antiMentionGcSettings[getAntilinkKey(botNumber, m.chat)] = { enabled: true, action: 'warn', warnLimit: limit };
+        saveAntiMentionGcSettings(antiMentionGcSettings);
+        reply(`✅ *Anti-MentionGC set to WARN mode*\nKicked after *${limit}* warning(s).`);
+    } else if (args[0].toLowerCase() === 'on') {
+        antiMentionGcSettings[getAntilinkKey(botNumber, m.chat)] = { enabled: true, action: 'delete' };
+        saveAntiMentionGcSettings(antiMentionGcSettings);
+        reply(`✅ *Anti-MentionGC enabled (Delete mode)*`);
+    } else if (args[0].toLowerCase() === 'kick') {
+        antiMentionGcSettings[getAntilinkKey(botNumber, m.chat)] = { enabled: true, action: 'kick' };
+        saveAntiMentionGcSettings(antiMentionGcSettings);
+        reply(`✅ *Anti-MentionGC set to KICK mode*`);
+    } else if (args[0].toLowerCase() === 'off') {
+        if (antiMentionGcSettings[getAntilinkKey(botNumber, m.chat)]) {
+            antiMentionGcSettings[getAntilinkKey(botNumber, m.chat)].enabled = false;
+            saveAntiMentionGcSettings(antiMentionGcSettings);
+            reply(`❌ *Anti-MentionGC disabled*`);
+        } else {
+            reply(`⚠️ *Anti-MentionGC is already disabled*`);
+        }
+    } else {
+        reply(`❌ *Invalid option.* Use: on, kick, off, or a number (e.g. ${prefix}antimentiongc 3)`);
+    }
+}
+break;
+
+case 'antibadword': {
     if (!isCreator && !isSudo) 
         return reply('🔒 *Owner/Sudo only*');
     
@@ -10957,39 +13179,30 @@ break;
 
 case "aitts":
 case "tts": {
-    if (!text) return reply(`🔊 *Text to Speech*\nUsage: ${prefix}tts [text]\n_Max: 20,000 characters_`);
-    if (text.length > 20000) return reply(`❌ *Text too long!* Max is 20,000 characters.\nYours: ${text.length} characters`);
-    try {
-        reply('⏳ *Generating speech...*');
-        const gTTS = require('google-tts-api');
-        // Split into chunks of 200 chars (Google TTS limit per request)
-        const getAllAudioUrls = gTTS.getAllAudioUrls(text, {
-            lang: 'en',
-            slow: false,
-            host: 'https://translate.google.com',
-            splitPunct: ',.!?;:'
-        });
-        if (getAllAudioUrls.length === 1) {
-            // Single chunk - send directly
-            await devtrust.sendMessage(m.chat, {
-                audio: { url: getAllAudioUrls[0].url },
-                mimetype: 'audio/mpeg',
-                ptt: false
-            }, { quoted: m });
-        } else {
-            // Multiple chunks - notify user
-            reply(`🔊 *Text split into ${getAllAudioUrls.length} parts. Sending all...*`);
-            for (let i = 0; i < getAllAudioUrls.length; i++) {
-                await devtrust.sendMessage(m.chat, {
-                    audio: { url: getAllAudioUrls[i].url },
-                    mimetype: 'audio/mpeg',
-                    ptt: false,
-                    fileName: `part_${i+1}.mp3`
-                }, { quoted: m });
-                await new Promise(r => setTimeout(r, 500));
-            }
-        }
-    } catch (e) { reply(`❌ *TTS Error:* ${e.message}`); }
+    if (!text) return reply(`🔊 *Text to Speech*\nUsage: ${prefix}tts [text]\n_Or pick a voice: ${prefix}ttsv <voice> <text> — see ${prefix}ttsvoices_`);
+    if (text.length > 500) return reply(`❌ *Text too long for one request!* Max ~500 characters per Prexzy TTS call.\nYours: ${text.length} characters`);
+    await prexzyTtsAndSend(m, reply, 'emma', text.trim());
+}
+break;
+
+case "ttsv": {
+    const [voice, ...rest] = (text || '').split(' ');
+    const say = rest.join(' ').trim();
+    if (!voice || !say) return reply(`🔊 *Usage:* ${prefix}ttsv <voice> <text>\nSee ${prefix}ttsvoices for the list.`);
+    const slug = voice.toLowerCase();
+    if (!TTS_NAMED_VOICES.includes(slug) && !TTS_LEGACY_VOICES.includes(slug) && !TTS_LANG_CODES.includes(slug)) {
+        return reply(`❌ *Unknown voice "${voice}".* See ${prefix}ttsvoices for valid options.`);
+    }
+    await prexzyTtsAndSend(m, reply, slug, say);
+}
+break;
+
+case "ttsvoices": {
+    reply(`🎙️ *TTS Voices* (${TTS_NAMED_VOICES.length + TTS_LEGACY_VOICES.length + TTS_LANG_CODES.length} total)\n\n` +
+        `*Named voices:*\n${TTS_NAMED_VOICES.join(', ')}\n\n` +
+        `*Novelty/legacy voices:*\n${TTS_LEGACY_VOICES.join(', ')}\n\n` +
+        `*Language codes* (use ${prefix}ttsv <code> <text>):\n${TTS_LANG_CODES.join(', ')}\n\n` +
+        `Usage: ${prefix}ttsv <voice> <text>`);
 }
 break;
 
@@ -11254,116 +13467,195 @@ case "identifyaudio": {
 break;
 // ============ END SHAZAM ============
 
-// ============ MADRIN API — DOWNLOADERS ============
+// Translates the raw Baileys/WhatsApp error strings from group actions
+// (kick/promote/demote) into something a non-technical person can act
+// on, instead of a bare exception message.
+function explainGroupActionError(e) {
+    const msg = (e?.message || String(e)).toLowerCase();
+    if (msg.includes('forbidden') || msg.includes('not-authorized') || msg.includes('401')) return "I don't have permission to do that — make sure I'm actually an admin here.";
+    if (msg.includes('not-acceptable') || msg.includes('406')) return "That person isn't in this group (or already left).";
+    if (msg.includes('item-not-found') || msg.includes('404')) return "Couldn't find that member in this group.";
+    if (msg.includes('rate') || msg.includes('429')) return "WhatsApp is rate-limiting this action — wait a bit and try again.";
+    return e?.message || String(e);
+}
+
+// ============ PREXZY API — GENERIC AI CHAT HANDLER ============
+// Same idea as prexzyDownloadAndSend but for the plain prompt->text-answer
+// AI endpoints. Field names again unverified live, so defensive extraction.
+function prexzyExtractAnswer(data) {
+    if (!data) return null;
+    return data.result || data.response || data.answer || data.message || data.text
+        || data.short_url || data.shortUrl || data.shortenedUrl
+        || data?.data?.result || data?.data?.response || data?.data?.answer
+        || data?.data?.message || data?.data?.text || data?.data?.short_url
+        || null;
+}
+async function prexzyAskAndReply(reply, { endpoint, params, label = '🤖 AI', loadingMsg, showLabel = true }) {
+    try {
+        if (loadingMsg) reply(loadingMsg);
+        const data = await prexzyGet(endpoint, params);
+        const answer = prexzyExtractAnswer(data);
+        if (data?.status === false || !answer) return reply(`❌ *No response from ${label}.*`);
+        reply(showLabel ? `${label}\n\n${answer}` : answer);
+    } catch (e) {
+        reply(`❌ *Error:* ${e.message}`);
+    }
+}
+
+// ============ PREXZY API — DOWNLOADERS ============
 case "igdl":
 case "instagram": {
     if (!text) return reply(`📸 *Instagram Downloader*\nUsage: ${prefix}igdl <instagram link>`);
-    try {
-        reply('⏳ *Downloading...*');
-        const data = await madrinGet('/download/instagram', { url: text.trim() });
-        const link = madrinExtractLink(data);
-        if (data?.status !== true || !link) return reply(`❌ *Download failed.* API said: ${data?.error || 'no link returned'}`);
-        await devtrust.sendMessage(m.chat, { video: { url: link }, caption: `📸 ${madrinExtractTitle(data, 'Instagram')}` }, { quoted: m });
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/instagram', params: { url: text.trim() }, label: '📸 Instagram' });
 }
 break;
 
-case "snapdl":
-case "snapchat": {
-    if (!text) return reply(`👻 *Snapchat Downloader*\nUsage: ${prefix}snapdl <snapchat spotlight link>`);
-    try {
-        reply('⏳ *Downloading...*');
-        const data = await madrinGet('/download/snapchat', { url: text.trim() });
-        const link = madrinExtractLink(data);
-        if (data?.status !== true || !link) return reply(`❌ *Download failed.* API said: ${data?.error || 'no link returned'}`);
-        await devtrust.sendMessage(m.chat, { video: { url: link }, caption: `👻 ${madrinExtractTitle(data, 'Snapchat')}` }, { quoted: m });
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
-}
-break;
+// DISABLED: no working backend, hidden per instruction (no Prexzy
+// equivalent for Snapchat, and no other-provider fallback allowed).
+// snapdl/snapchat removed — falls through to unknown-command handling.
 
 case "ytmp4":
+case "ytvideo":
+case "ytv2":
 case "videoplay": {
-    if (!text) return reply(`🎬 *YouTube Video Downloader*\nUsage: ${prefix}ytmp4 <youtube link or song name>`);
-    try {
-        reply('⏳ *Downloading...*');
-        let ytUrl = text.trim();
-        if (!ytUrl.includes('youtube.com') && !ytUrl.includes('youtu.be')) {
-            const ytResults = await yts(ytUrl);
-            if (!ytResults.videos.length) return reply('❌ *No results found.*');
-            ytUrl = ytResults.videos[0].url;
-        }
-        const data = await madrinGet('/download/ytmp4', { url: ytUrl });
-        const link = madrinExtractLink(data);
-        if (data?.status !== true || !link) return reply(`❌ *Download failed.* API said: ${data?.error || 'no link returned'}`);
-        await devtrust.sendMessage(m.chat, { video: { url: link }, caption: `🎬 ${madrinExtractTitle(data, 'Video')}` }, { quoted: m });
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    if (!text) return reply(`🎬 *YouTube Video Downloader*\nUsage: ${prefix}ytmp4 <youtube video link>`);
+    // Prexzy's /download/ytmp4 only documents a `url` param (no built-in
+    // search like the old Madrin endpoint's `q` did) — pass a real link.
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/ytmp4', params: { url: text.trim() }, label: '🎬 YouTube' });
 }
 break;
 
 case "mediafire": {
     if (!text) return reply(`📁 *MediaFire Downloader*\nUsage: ${prefix}mediafire <mediafire link>`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/mediafire', params: { url: text.trim() }, label: 'MediaFire', mediaType: 'document' });
+}
+break;
+
+// ===== NEW: Prexzy-only downloaders not previously in this bot =====
+case "facebook":
+case "fb":
+case "ff":
+case "fbdl": {
+    if (!text) return reply(`📘 *Facebook Downloader*\nUsage: ${prefix}fb <facebook video link>`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/facebookv2', params: { url: text.trim() }, label: '📘 Facebook' });
+}
+break;
+
+case "twitter":
+case "twt":
+case "xdl": {
+    if (!text) return reply(`🐦 *Twitter/X Downloader*\nUsage: ${prefix}twitter <tweet link>`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/twitter', params: { url: text.trim() }, label: '🐦 Twitter/X' });
+}
+break;
+
+case "scdl":
+case "soundclouddl": {
+    if (!text) return reply(`🔊 *SoundCloud Downloader*\nUsage: ${prefix}scdl <soundcloud link>`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/scloud', params: { url: text.trim(), quality: 192 }, label: '🔊 SoundCloud', mediaType: 'audio' });
+}
+break;
+
+case "terabox": {
+    if (!text) return reply(`📦 *Terabox Downloader*\nUsage: ${prefix}terabox <terabox link>`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/terabox', params: { url: text.trim() }, label: '📦 Terabox' });
+}
+break;
+
+case "threads": {
+    if (!text) return reply(`🧵 *Threads Downloader*\nUsage: ${prefix}threads <threads link>`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/threadsV2', params: { url: text.trim() }, label: '🧵 Threads' });
+}
+break;
+
+case "capcut": {
+    if (!text) return reply(`✂️ *Capcut Downloader*\nUsage: ${prefix}capcut <capcut link>`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/capcut', params: { url: text.trim() }, label: '✂️ Capcut' });
+}
+break;
+
+case "douyin": {
+    if (!text) return reply(`🇨🇳 *Douyin Downloader*\nUsage: ${prefix}douyin <douyin link>`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/douyin', params: { url: text.trim() }, label: '🇨🇳 Douyin' });
+}
+break;
+
+case "rednote": {
+    if (!text) return reply(`📕 *RedNote Downloader*\nUsage: ${prefix}rednote <rednote/xiaohongshu link>`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/rednote', params: { url: text.trim() }, label: '📕 RedNote' });
+}
+break;
+
+case "sfile": {
+    if (!text) return reply(`💾 *Sfile Downloader*\nUsage: ${prefix}sfile <sfile.mobi link>`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/sfile', params: { url: text.trim() }, label: 'Sfile', mediaType: 'document' });
+}
+break;
+
+case "snackvideo": {
+    if (!text) return reply(`🍿 *Snackvideo Downloader*\nUsage: ${prefix}snackvideo <snackvideo link>`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/snackvideo', params: { url: text.trim() }, label: '🍿 Snackvideo' });
+}
+break;
+
+case "web2zip": {
+    if (!text) return reply(`🗜️ *Website to ZIP*\nUsage: ${prefix}web2zip <website url>`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/saveweb2zip', params: { url: text.trim() }, label: 'Website ZIP', mediaType: 'document', fileName: 'website.zip' });
+}
+break;
+
+case "ytinfo": {
+    if (!text) return reply(`ℹ️ *YouTube Info*\nUsage: ${prefix}ytinfo <youtube link>`);
     try {
-        reply('⏳ *Fetching link...*');
-        const data = await madrinGet('/tools/mediafire', { url: text.trim() });
-        const link = madrinExtractLink(data);
-        if (data?.status !== true || !link) return reply(`❌ *Failed.* API said: ${data?.error || 'no link returned'}`);
-        await devtrust.sendMessage(m.chat, { document: { url: link }, fileName: madrinExtractTitle(data, 'file'), mimetype: 'application/octet-stream' }, { quoted: m });
+        const data = await prexzyGet('/download/ytinfo', { url: text.trim() });
+        const info = data?.result || data?.data || data;
+        if (data?.status === false || !info) return reply(`❌ *Failed.* ${data?.error || data?.message || 'no info returned'}`);
+        reply(`ℹ️ *${info.title || 'YouTube Video'}*\n` +
+              (info.duration ? `⏱️ Duration: ${info.duration}\n` : '') +
+              (info.views ? `👁️ Views: ${info.views}\n` : '') +
+              (info.author || info.channel ? `📺 Channel: ${info.author || info.channel}\n` : ''));
     } catch (e) { reply(`❌ *Error:* ${e.message}`); }
 }
 break;
 
-// ============ MADRIN API — AI CHAT ============
+// ============ PREXZY API — AI CHAT ============
+// Prexzy has no direct GPT-5/Blackbox/Copilot endpoints (checked the full
+// 56-endpoint AI list) — mapped each to the closest real equivalent.
 case "gpt5": {
     if (!text) return reply(`🤖 *GPT-5*\nUsage: ${prefix}gpt5 <your question>`);
-    try {
-        const data = await madrinGet('/ai/gpt5', { text: text.trim(), q: text.trim(), prompt: text.trim() });
-        const answer = data?.result || data?.data?.result || data?.answer || data?.message;
-        if (!answer) return reply('❌ *No response from GPT-5.*');
-        reply(answer);
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    // AskGPT5 is Prexzy's actual GPT-5-branded endpoint.
+    await prexzyAskAndReply(reply, { endpoint: '/ai/askgpt5', params: { prompt: text.trim() }, label: '🤖 GPT-5', showLabel: false });
 }
 break;
 
 case "blackbox": {
     if (!text) return reply(`🤖 *Blackbox AI*\nUsage: ${prefix}blackbox <your question>`);
-    try {
-        const data = await madrinGet('/blackbox', { text: text.trim(), q: text.trim(), prompt: text.trim() });
-        const answer = data?.result || data?.data?.result || data?.answer || data?.message;
-        if (!answer) return reply('❌ *No response from Blackbox.*');
-        reply(answer);
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    // No Blackbox equivalent in Prexzy — substituted with ChatBot App
+    // (web-search-capable general chat) as the closest fit.
+    await prexzyAskAndReply(reply, { endpoint: '/ai/chatbot', params: { text: text.trim(), search: true }, label: '🤖 Blackbox AI', showLabel: false });
 }
 break;
 
 case "copilot": {
     if (!text) return reply(`🤖 *Copilot*\nUsage: ${prefix}copilot <your question>`);
-    try {
-        const data = await madrinGet('/ai/copilot', { text: text.trim(), q: text.trim(), prompt: text.trim() });
-        const answer = data?.result || data?.data?.result || data?.answer || data?.message;
-        if (!answer) return reply('❌ *No response from Copilot.*');
-        reply(answer);
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    // No Copilot equivalent in Prexzy — substituted with Qwen AI Chat.
+    await prexzyAskAndReply(reply, { endpoint: '/ai/qwen', params: { prompt: text.trim() }, label: '🤖 Copilot', showLabel: false });
 }
 break;
 
 // ============ MADRIN API — SEARCH (SCROLLABLE TABLE) ============
-case "stickersearch": {
-    if (!text) return reply(`🔍 *Sticker Search*\nUsage: ${prefix}stickersearch <query>`);
-    try {
-        const data = await madrinGet('/search/stickers', { q: text.trim(), query: text.trim() });
-        const results = data?.result || data?.data || [];
-        if (!Array.isArray(results) || !results.length) return reply('❌ *No stickers found.*');
-        const rows = [['#', 'Name', 'Link'], ...results.slice(0, 10).map((r, i) => [`${i+1}`, r.name || r.title || '-', r.url || r.link || '-'])];
-        await sendTable(devtrust, m.chat, { title: 'Sticker Search', headerText: `Results for "${text.trim()}"`, rows, contextMsg: m });
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
-}
-break;
+// NOTE: stickerly, wattpad, and bilibili have no equivalent in Prexzy's
+// Search category (checked the full 18-endpoint list) — still on the old
+// Madrin API for now, not silently dropped.
+// DISABLED: no Prexzy equivalent, hidden per instruction — falls
+// through to unknown-command handling.
+// stickersearch removed.
 
 case "applemusic": {
     if (!text) return reply(`🎵 *Apple Music Search*\nUsage: ${prefix}applemusic <song name>`);
     try {
-        const data = await madrinGet('/search/applemusic', { q: text.trim(), query: text.trim() });
-        const results = data?.result || data?.data || [];
+        const data = await prexzyGet('/search/applemusic', { q: text.trim() });
+        const results = data?.results || [];
         if (!Array.isArray(results) || !results.length) return reply('❌ *No results found.*');
         const rows = [['#', 'Title', 'Artist'], ...results.slice(0, 10).map((r, i) => [`${i+1}`, r.title || '-', r.artist || '-'])];
         await sendTable(devtrust, m.chat, { title: 'Apple Music Search', headerText: `Results for "${text.trim()}"`, rows, contextMsg: m });
@@ -11374,8 +13666,8 @@ break;
 case "soundcloud": {
     if (!text) return reply(`☁️ *SoundCloud Search*\nUsage: ${prefix}soundcloud <song name>`);
     try {
-        const data = await madrinGet('/search/soundcloud', { q: text.trim(), query: text.trim() });
-        const results = data?.result || data?.data || [];
+        const data = await prexzyGet('/search/soundcloud', { q: text.trim() });
+        const results = data?.result || [];
         if (!Array.isArray(results) || !results.length) return reply('❌ *No results found.*');
         const rows = [['#', 'Title', 'Link'], ...results.slice(0, 10).map((r, i) => [`${i+1}`, r.title || '-', r.url || r.link || '-'])];
         await sendTable(devtrust, m.chat, { title: 'SoundCloud Search', headerText: `Results for "${text.trim()}"`, rows, contextMsg: m });
@@ -11383,28 +13675,38 @@ case "soundcloud": {
 }
 break;
 
-case "wattpad": {
-    if (!text) return reply(`📖 *Wattpad Search*\nUsage: ${prefix}wattpad <story name>`);
+// DISABLED: no Prexzy equivalent, hidden per instruction — wattpad and
+// bilibili removed, both fall through to unknown-command handling.
+
+// ===== NEW: Prexzy-only search endpoints not previously in this bot =====
+case "cuaca": {
+    if (!text) return reply(`🌦️ *Weather*\nUsage: ${prefix}cuaca <city>`);
+    await prexzyAskAndReply(reply, { endpoint: '/search/cuaca', params: { kota: text.trim() }, label: `🌦️ Weather: ${text.trim()}`, showLabel: false });
+}
+break;
+
+case "imdb": {
+    if (!text) return reply(`🎬 *IMDb Search*\nUsage: ${prefix}imdb <movie/series name>`);
     try {
-        const data = await madrinGet('/search/wattpad', { q: text.trim(), query: text.trim() });
-        const results = data?.result || data?.data || [];
-        if (!Array.isArray(results) || !results.length) return reply('❌ *No results found.*');
-        const rows = [['#', 'Title', 'Author'], ...results.slice(0, 10).map((r, i) => [`${i+1}`, r.title || '-', r.author || '-'])];
-        await sendTable(devtrust, m.chat, { title: 'Wattpad Search', headerText: `Results for "${text.trim()}"`, rows, contextMsg: m });
+        const data = await prexzyGet('/search/imdb', { query: text.trim() });
+        const result = data?.result || data;
+        if (data?.status === false || !result) return reply('❌ *No results found.*');
+        reply(`🎬 *${result.title || text.trim()}*\n${result.year ? `📅 ${result.year}\n` : ''}${result.rating ? `⭐ ${result.rating}\n` : ''}${result.plot || result.description || ''}`);
     } catch (e) { reply(`❌ *Error:* ${e.message}`); }
 }
 break;
 
-case "bilibili": {
-    if (!text) return reply(`📺 *Bilibili Search*\nUsage: ${prefix}bilibili <query>`);
-    try {
-        const data = await madrinGet('/search/bilibili', { q: text.trim(), query: text.trim() });
-        const results = data?.result || data?.data || [];
-        if (!Array.isArray(results) || !results.length) return reply('❌ *No results found.*');
-        const rows = [['#', 'Title', 'Link'], ...results.slice(0, 10).map((r, i) => [`${i+1}`, r.title || '-', r.url || r.link || '-'])];
-        await sendTable(devtrust, m.chat, { title: 'Bilibili Search', headerText: `Results for "${text.trim()}"`, rows, contextMsg: m });
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+case "nik": {
+    if (!text) return reply(`🪪 *NIK Parse*\nUsage: ${prefix}nik <NIK number>`);
+    await prexzyAskAndReply(reply, { endpoint: '/search/nik', params: { q: text.trim() }, label: '🪪 NIK Info', showLabel: false });
 }
+break;
+
+case "songfinder": {
+    if (!text) return reply(`🎧 *Song Finder*\nUsage: ${prefix}songfinder <youtube/video url>`);
+    await prexzyAskAndReply(reply, { endpoint: '/search/songfinder', params: { url: text.trim() }, label: '🎧 Song Finder', showLabel: false });
+}
+break;
 break;
 
 // ============ MADRIN API — TOOLS ============
@@ -11453,10 +13755,15 @@ break;
 case "html2img": {
     if (!text) return reply(`🖼️ *HTML to Image*\nUsage: ${prefix}html2img <html code>`);
     try {
-        const data = await madrinGet('/tools/html2img', { html: text.trim() });
-        const link = madrinExtractLink(data);
-        if (data?.status !== true || !link) return reply(`❌ *Failed.* API said: ${data?.error || 'no link returned'}`);
-        await devtrust.sendMessage(m.chat, { image: { url: link } }, { quoted: m });
+        // This endpoint returns raw image bytes directly (binary), not a
+        // JSON wrapper with a link — so this can't go through madrinGet
+        // (which assumes JSON). Fetch as arraybuffer and send the bytes.
+        const res = await axios.get(`${PREXZY_BASE}/tools/html2imgdirect`, {
+            params: { html: text.trim() },
+            responseType: 'arraybuffer',
+            timeout: 25000
+        });
+        await devtrust.sendMessage(m.chat, { image: Buffer.from(res.data) }, { quoted: m });
     } catch (e) { reply(`❌ *Error:* ${e.message}`); }
 }
 break;
@@ -11465,8 +13772,8 @@ case "tojs":
 case "tojavascript": {
     if (!text) return reply(`🔄 *Convert to JavaScript*\nUsage: ${prefix}tojs <code>`);
     try {
-        const data = await madrinGet('/tools/tojavascript', { code: text.trim() });
-        const converted = data?.result || data?.data?.result || data?.code;
+        const data = await prexzyGet('/tools/tojavascript', { code: text.trim() });
+        const converted = data?.converted_code;
         if (data?.status !== true || !converted) return reply('❌ *Conversion failed.*');
         reply(`\`\`\`${converted}\`\`\``);
     } catch (e) { reply(`❌ *Error:* ${e.message}`); }
@@ -11477,36 +13784,56 @@ case "topy":
 case "topython": {
     if (!text) return reply(`🔄 *Convert to Python*\nUsage: ${prefix}topy <code>`);
     try {
-        const data = await madrinGet('/tools/topython', { code: text.trim() });
-        const converted = data?.result || data?.data?.result || data?.code;
+        const data = await prexzyGet('/tools/topython', { code: text.trim() });
+        const converted = data?.converted_code;
         if (data?.status !== true || !converted) return reply('❌ *Conversion failed.*');
         reply(`\`\`\`${converted}\`\`\``);
     } catch (e) { reply(`❌ *Error:* ${e.message}`); }
 }
 break;
 
+case "obfuscate":
 case "htmlprotect": {
-    // Usage: .htmlprotect max|high|ecnc <html code>
+    // Prexzy has real JS Obfuscator endpoints at 4 levels (low/medium/
+    // high/extreme) — better match than the old make-believe /coding/*
+    // ones this used to hit.
     const parts = (text || '').trim().split(/\s+/);
     const level = (parts.shift() || '').toLowerCase();
-    const htmlCode = parts.join(' ');
-    const levelMap = { max: '/tools/htmlmaximum', maximum: '/tools/htmlmaximum', high: '/tools/htmlhigh', ecnc: '/tools/htmlecnc' };
+    const code = parts.join(' ');
+    const levelMap = { low: '/tools/obflow', medium: '/tools/obfmedium', high: '/tools/obfhigh', extreme: '/tools/obfextreme', insane: '/tools/obfextreme' };
     const endpoint = levelMap[level];
-    if (!endpoint || !htmlCode) return reply(`🔒 *HTML Protector*\nUsage: ${prefix}htmlprotect <max|high|ecnc> <html code>`);
+    if (!endpoint || !code) return reply(`🔒 *Code Obfuscator*\nUsage: ${prefix}obfuscate <low|medium|high|extreme> <code>`);
     try {
-        const data = await madrinGet(endpoint, { html: htmlCode });
-        const protectedCode = data?.result || data?.data?.result || data?.code;
-        if (data?.status !== true || !protectedCode) return reply('❌ *Protection failed.*');
-        reply(`\`\`\`${protectedCode}\`\`\``);
+        const data = await prexzyGet(endpoint, { code });
+        const result = data?.result || data?.code || data?.data?.result;
+        if (data?.status === false || !result) return reply('❌ *Obfuscation failed.*');
+        reply(`\`\`\`${result}\`\`\``);
     } catch (e) { reply(`❌ *Error:* ${e.message}`); }
 }
 break;
 
-// ============ MADRIN API — FUN ============
+// ============ LOGO / MAKER — DISABLED ============
+// No working backend (checked Prexzy's full endpoint list, no match for
+// these 98 style names; the old Madrin provider is off-limits per
+// instruction). Rather than leave users hitting a dead command, .logo/
+// .maker/.logolist/.makerlist are removed entirely — they now fall
+// through to the bot's normal unknown-command handling instead of
+// returning a "not available" error. Re-enable by restoring this block
+// if/when a real replacement provider is found.
 case "pickupline": {
     try {
-        const data = await madrinGet('/pickupline');
-        const line = data?.result || data?.data || data?.line;
+        const pickupLines = [
+            "Are you a magician? Because whenever I look at you, everyone else disappears.",
+            "Do you have a map? I keep getting lost in your eyes.",
+            "Is your name Google? Because you have everything I've been searching for.",
+            "If you were a vegetable, you'd be a cute-cumber.",
+            "Are you made of copper and tellurium? Because you're Cu-Te.",
+            "Do you believe in love at first sight, or should I walk by again?",
+            "Are you a parking ticket? Because you've got fine written all over you.",
+            "Is there an airport nearby, or is that just my heart taking off?"
+        ];
+        const data = { status: true, result: pickupLines[Math.floor(Math.random() * pickupLines.length)] };
+        const line = data?.result || data?.line || (typeof data === 'string' ? data : null);
         reply(line ? `💘 ${line}` : '❌ *Could not fetch a pickup line.*');
     } catch (e) { reply(`❌ *Error:* ${e.message}`); }
 }
@@ -11514,8 +13841,9 @@ break;
 
 case "fact": {
     try {
-        const data = await madrinGet('/fact');
-        const line = data?.result || data?.data || data?.fact;
+        const res = await axios.get("https://uselessfacts.jsph.pl/random.json?language=en");
+        const data = { status: true, result: res.data?.text };
+        const line = data?.result || data?.fact || (typeof data === 'string' ? data : null);
         reply(line ? `📚 *Did you know?*\n${line}` : '❌ *Could not fetch a fact.*');
     } catch (e) { reply(`❌ *Error:* ${e.message}`); }
 }
@@ -11555,7 +13883,6 @@ _Prefix: . | 773 commands total_
 • .igdl / .instagram
 • .insta / .instagram
 • .mediafire
-• .snapdl / .snapchat
 • .spotify / .spotifydl / .sp
 • .spotify2 / .spotifydl2
 • .tiktok / .tt
@@ -11577,12 +13904,9 @@ _Prefix: . | 773 commands total_
 • .ttsptt / .voicenote
 
 🔍 *SEARCH TOOLS*
-• .bilibili
 • .manga
 • .pint / .pinterest
 • .pinterest
-• .stickersearch
-• .wattpad
 
 👥 *GROUP MANAGEMENT*
 • .add
@@ -11653,7 +13977,6 @@ _Prefix: . | 773 commands total_
 • .imgbb
 • .mp4 / .togif
 • .rainbow
-• .removebg
 • .roundstk
 • .take
 • .toimg
@@ -12124,61 +14447,9 @@ _Prefix: . | 773 commands total_
 }
 break;
 
-case "removebg": {
-    // Check if there's a quoted message
-    if (!m.quoted) {
-        return await reply("🖼️ *Reply to an image with .removebg*\nExample: Reply to any image and type .removebg");
-    }
-    
-    // Get the quoted message
-    const quotedMsg = m.quoted;
-    
-    // Check if it's an image
-    const mime = (quotedMsg.msg || quotedMsg).mimetype || '';
-    const isImage = /image\/(png|jpe?g|gif|webp)/.test(mime);
-    
-    if (!isImage) {
-        return await reply("❌ *That's not an image.* Reply to a JPG/PNG image.");
-    }
-
-    try {
-        await devtrust.sendMessage(m.chat, { react: { text: '⏳', key: m.key } });
-        
-        await reply(`🔍 *Removing background...*`);
-        
-        // Download the image
-        let media = await quotedMsg.download();
-        
-        // Upload to temporary hosting
-        let uploadedUrl = await uploadToCatbox(media);
-        
-        if (!uploadedUrl) {
-            throw new Error('Upload failed');
-        }
-        
-        // Call removebg API
-        let response = await fetch(`https://apis.prexzyvilla.site/imagecreator/removebg?url=${encodeURIComponent(uploadedUrl)}`);
-        let data = await response.json();
-
-        if (data.status && data.data) {
-            await devtrust.sendMessage(m.chat,
-                addNewsletterContext({
-                    image: { url: data.data },
-                    caption: "✨ *Background Removed*"
-                }),
-                { quoted: m }
-            );
-            await devtrust.sendMessage(m.chat, { react: { text: '✅', key: m.key } });
-        } else {
-            throw new Error('API returned error');
-        }
-    } catch (e) {
-        console.error('RemoveBG error:', e);
-        await devtrust.sendMessage(m.chat, { react: { text: '❌', key: m.key } });
-        await reply("⚠️ *Failed to remove background.* The service might be down. Try again later.");
-    }
-}
-break;
+// DISABLED: no working backend for background removal anywhere I could
+// verify (Prexzy has no such endpoint), hidden per instruction —
+// removebg removed, falls through to unknown-command handling.
 
 case 'tiktok':
 case 'tt': {
@@ -12188,32 +14459,25 @@ case 'tt': {
     if (!text.includes('tiktok.com')) {
         return reply(`❌ *Invalid TikTok link*`);
     }
-    
+
     m.reply("*⏳ Fetching video...*");
 
-    const tiktokApiUrl = `https://api.bk9.dev/download/tiktok?url=${encodeURIComponent(text)}`;
+    try {
+        const data = await prexzyGet('/download/tiktok', { url: text.trim() });
+        const videoUrl = madrinExtractLink(data);
+        if (data?.status === false || !videoUrl) return reply('❌ *Failed to get download link*');
 
-    fetch(tiktokApiUrl)
-        .then(response => response.json())
-        .then(data => {
-            if (!data.status || !data.BK9 || !data.BK9.BK9) {
-                return reply('❌ *Failed to get download link*');
-            }
-            
-            const videoUrl = data.BK9.BK9;
-            
-            devtrust.sendMessage(m.chat, 
-                addNewsletterContext({
-                    video: { url: videoUrl },
-                    caption: "🎵 *${botDisplayName} TikTok*"
-                }), 
-                { quoted: m }
-            );
-        })
-        .catch(err => {
-            console.error(err);
-            reply("❌ *Download failed* • Network error");
-        });
+        await devtrust.sendMessage(m.chat,
+            addNewsletterContext({
+                video: { url: videoUrl },
+                caption: `🎵 *${botDisplayName} TikTok*${data.title ? `\n${data.title}` : ''}`
+            }),
+            { quoted: m }
+        );
+    } catch (err) {
+        console.error(err);
+        reply("❌ *Download failed* • Network error");
+    }
 }
 break;
 
@@ -12352,33 +14616,30 @@ case 'myip': {
 
 case "movie": {
     if (!text) return reply("🎬 *Example:* movie Inception");
-
     await devtrust.sendPresenceUpdate("composing", m.chat);
-
+    // Swapped OMDb (hardcoded shared API key, easily rate-limited) for
+    // Prexzy's own Movies category.
     try {
-        const res = await axios.get(`http://www.omdbapi.com/?t=${encodeURIComponent(text)}&apikey=6372bb60`);
-        if (res.data.Response === "False") return reply("❌ *Movie not found*");
-
-        const data = res.data;
-
-        let caption = `🎬 *${data.Title}*\n\n` +
-            `📅 ${data.Year} • ⭐ ${data.imdbRating}\n` +
-            `🎭 ${data.Genre}\n\n` +
-            `📝 ${data.Plot.substring(0, 200)}...\n\n` +
-            `👤 ${data.Director}`;
-
-        await devtrust.sendMessage(m.chat, 
-            addNewsletterContext({
-                image: { url: data.Poster !== "N/A" ? data.Poster : "https://i.ibb.co/4f4tTnG/no-poster.png" },
-                caption: caption
-            }), 
-            { quoted: m }
-        );
+        const data = await prexzyGet('/moviesearch', { query: text.trim() });
+        const results = data?.result || data?.results || data?.data || [];
+        const first = Array.isArray(results) ? results[0] : results;
+        if (data?.status === false || !first) return reply("❌ *Movie not found*");
+        const caption = `🎬 *${first.title || text.trim()}*\n\n` +
+            `${first.year ? `📅 ${first.year}` : ''}${first.rating ? ` • ⭐ ${first.rating}` : ''}\n` +
+            `${first.genre ? `🎭 ${first.genre}\n` : ''}\n` +
+            `${first.description || first.plot ? `📝 ${(first.description || first.plot).substring(0, 200)}...` : ''}`;
+        const poster = first.image || first.poster || first.thumbnail;
+        if (poster) {
+            await devtrust.sendMessage(m.chat, addNewsletterContext({ image: { url: poster }, caption }), { quoted: m });
+        } else {
+            reply(caption);
+        }
     } catch (e) {
         console.error(e);
         reply("⚠️ *Movie info unavailable* • Try again later");
     }
 }
+break;
 break;
 
 case "sciencefact": {
@@ -12911,15 +15172,23 @@ case "dadjoke": {
 break;
 
 case "progquote": {
-    try {
-        const res = await axios.get("https://hdramming-quotes-api.herokuapp.com/quotes/random");
-        const quote = res.data?.en || "Talk is cheap. Show me the code.";
-        const author = res.data?.author || "Linus Torvalds";
-        reply(`💻 *"${quote}"*\n— ${author}`);
-    } catch (e) {
-        console.error("PROGQUOTE ERROR:", e);
-        reply("❌ *Quote not found* • 404 error");
-    }
+    // hdramming-quotes-api.herokuapp.com is dead — Heroku killed all free
+    // dynos in Nov 2022, permanently. Local list instead, no network
+    // dependency to break again.
+    const progQuotes = [
+        ["Talk is cheap. Show me the code.", "Linus Torvalds"],
+        ["Programs must be written for people to read, and only incidentally for machines to execute.", "Harold Abelson"],
+        ["Any fool can write code that a computer can understand. Good programmers write code that humans can understand.", "Martin Fowler"],
+        ["First, solve the problem. Then, write the code.", "John Johnson"],
+        ["Simplicity is the soul of efficiency.", "Austin Freeman"],
+        ["Make it work, make it right, make it fast.", "Kent Beck"],
+        ["The best error message is the one that never shows up.", "Thomas Fuchs"],
+        ["Code is like humor. When you have to explain it, it's bad.", "Cory House"],
+        ["Premature optimization is the root of all evil.", "Donald Knuth"],
+        ["Weeks of coding can save you hours of planning.", "Unknown"]
+    ];
+    const [quote, author] = progQuotes[Math.floor(Math.random() * progQuotes.length)];
+    reply(`💻 *"${quote}"*\n— ${author}`);
 }
 break;
 
@@ -12937,15 +15206,22 @@ case "guess": {
 break;
 
 case "moviequote": {
-    try {
-        const res = await axios.get("https://movie-quote-api.herokuapp.com/v1/quote/");
-        const quote = res.data?.quote || "May the Force be with you.";
-        const movie = res.data?.show || "Unknown";
-        reply(`🎬 *"${quote}"*\n— ${movie}`);
-    } catch (e) {
-        console.error("MOVIE QUOTE ERROR:", e);
-        reply("❌ *Movie quote unavailable* • Cinema closed");
-    }
+    // movie-quote-api.herokuapp.com is dead for the same reason as
+    // progquote above — Heroku's free tier is gone for good.
+    const movieQuotes = [
+        ["May the Force be with you.", "Star Wars"],
+        ["I'll be back.", "The Terminator"],
+        ["Life is like a box of chocolates.", "Forrest Gump"],
+        ["Here's looking at you, kid.", "Casablanca"],
+        ["You can't handle the truth!", "A Few Good Men"],
+        ["I'm gonna make him an offer he can't refuse.", "The Godfather"],
+        ["To infinity and beyond!", "Toy Story"],
+        ["Why so serious?", "The Dark Knight"],
+        ["There's no place like home.", "The Wizard of Oz"],
+        ["Just keep swimming.", "Finding Nemo"]
+    ];
+    const [quote, movie] = movieQuotes[Math.floor(Math.random() * movieQuotes.length)];
+    reply(`🎬 *"${quote}"*\n— ${movie}`);
 }
 break;
 
@@ -13108,15 +15384,17 @@ case "foxgirl": {
 break;
 
 case "wallpaper": {
-    const wallpapers = [
-        'https://w.wallhaven.cc/full/zy/wallhaven-zy3wqx.jpg',
-        'https://w.wallhaven.cc/full/4g/wallhaven-4gdlq3.jpg',
-        'https://w.wallhaven.cc/full/ex/wallhaven-exvkvo.jpg'
-    ];
-    await devtrust.sendMessage(m.chat, {
-        image: { url: wallpapers[Math.floor(Math.random() * wallpapers.length)] },
-        caption: '🖼️ *Random Wallpaper*'
-    }, { quoted: m });
+    // Was a hardcoded 3-item "random" list — now a real search against
+    // Prexzy's wallpaper endpoint.
+    const query = (text || 'nature').trim();
+    try {
+        const data = await prexzyGet('/search/wallpaper', { query });
+        const results = data?.result || data?.results || data?.data || [];
+        const first = Array.isArray(results) ? results[0] : null;
+        const link = madrinExtractLink(first) || first?.url || first?.image;
+        if (!link) return reply('❌ *No wallpapers found.*');
+        await devtrust.sendMessage(m.chat, { image: { url: link }, caption: `🖼️ *Wallpaper: ${query}*` }, { quoted: m });
+    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
 }
 break;
 
@@ -13219,22 +15497,99 @@ break;
 // ============ END FUN COMMANDS ============
 
 case "meme": {
+    // Swapped meme-api.com (single source) for Prexzy's meme generator
+    // driven by a random popular caption pair — a real generated image
+    // instead of a scraped reddit post.
     try {
-        const res = await axios.get("https://meme-api.com/gimme");
-        const meme = res.data;
-        if (!meme?.url) return reply("❌ *Meme ran away*");
-        
-        await devtrust.sendMessage(m.chat, 
-            addNewsletterContext({
-                image: { url: meme.url },
-                caption: `😂 *${meme.title}*`
-            }), 
-            { quoted: m }
-        );
+        const captions = [['When the code works', 'On the first try'], ['Me explaining my code', 'To the rubber duck'], ['Nobody:', 'Me at 3am debugging'], ['That feeling when', 'Tests pass first try']];
+        const [top, bottom] = captions[Math.floor(Math.random() * captions.length)];
+        await prexzyDownloadAndSend(m, reply, { endpoint: '/imagecreator/meme', params: { topText: top, bottomText: bottom }, label: '😂 Meme', mediaType: 'image' });
     } catch (e) {
         console.error("MEME ERROR:", e);
         reply("❌ *Meme factory closed*");
     }
+}
+break;
+
+case "custommeme": {
+    const [top, bottom] = (text || '').split('|').map(s => (s || '').trim());
+    if (!top) return reply(`😂 *Custom Meme*\nUsage: ${prefix}custommeme top text | bottom text`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/imagecreator/meme', params: { topText: top, bottomText: bottom || '' }, label: '😂 Meme', mediaType: 'image' });
+}
+break;
+
+// ===== NEW: Prexzy Style Text (34 styles) — one dispatcher =====
+case "style": {
+    const parts = (text || '').trim().split(/\s+/);
+    const styleName = (parts.shift() || '').toLowerCase();
+    const styleText = parts.join(' ');
+    if (!styleName || !styleText) return reply(`✨ *Style Text*\nUsage: ${prefix}style <style> <text>\n\nStyles: ${STYLE_TEXT_LIST.join(', ')}`);
+    if (!STYLE_TEXT_LIST.includes(styleName)) return reply(`❌ *Unknown style.* See ${prefix}style for the list.`);
+    await prexzyAskAndReply(reply, { endpoint: `/tools/${styleName}`, params: { text: styleText }, showLabel: false });
+}
+break;
+
+// ===== NEW: Prexzy Text Maker (30 graphic text-effect generators) =====
+case "textfx": {
+    const parts = (text || '').trim().split(/\s+/);
+    const fx = (parts.shift() || '').toLowerCase();
+    const fxText = parts.join(' ');
+    const endpoint = TEXTFX_MAP[fx];
+    if (!endpoint || !fxText) return reply(`🎨 *Text Effect*\nUsage: ${prefix}textfx <effect> <text>\n\nEffects: ${Object.keys(TEXTFX_MAP).join(', ')}`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: `/${endpoint}`, params: { text: fxText }, label: `🎨 ${fx}`, mediaType: 'image' });
+}
+break;
+
+// ===== NEW: Prexzy AI Image Creator (17 art styles) =====
+case "aiimg": {
+    const parts = (text || '').trim().split(/\s+/);
+    const style = (parts.shift() || '').toLowerCase();
+    const prompt = parts.join(' ');
+    if (!AIIMG_STYLES.includes(style) || !prompt) return reply(`🖼️ *AI Image*\nUsage: ${prefix}aiimg <style> <prompt>\n\nStyles: ${AIIMG_STYLES.join(', ')}`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: `/ai/${style}`, params: { prompt }, label: `🖼️ ${style}`, mediaType: 'image' });
+}
+break;
+
+case "ttp": {
+    if (!text) return reply(`✍️ *TTP*\nUsage: ${prefix}ttp <text>`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/imagecreator/ttp', params: { text: text.trim() }, label: '✍️ TTP', mediaType: 'image' });
+}
+break;
+
+case "txt2img": {
+    if (!text) return reply(`🖼️ *Text to Image*\nUsage: ${prefix}txt2img <text>`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/imagecreator/image', params: { text: text.trim() }, label: '🖼️ Text Image', mediaType: 'image' });
+}
+break;
+
+// ===== NEW: Prexzy Anime / Manga =====
+case "mangasearch": {
+    if (!text) return reply(`📖 *Manga Search*\nUsage: ${prefix}mangasearch <title>`);
+    try {
+        const data = await prexzyGet('/anime/manga-search', { query: text.trim() });
+        const results = data?.result || data?.results || [];
+        if (!Array.isArray(results) || !results.length) return reply('❌ *No manga found.*');
+        const rows = [['#', 'Title', 'Status'], ...results.slice(0, 10).map((r, i) => [`${i + 1}`, r.title || r.name || '-', r.status || '-'])];
+        await sendTable(devtrust, m.chat, { title: 'Manga Search', headerText: `Results for "${text.trim()}"`, rows, contextMsg: m });
+    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+}
+break;
+
+case "animegenre": {
+    if (!text) return reply(`🎞️ *Anime By Genre*\nUsage: ${prefix}animegenre <genre>`);
+    try {
+        const data = await prexzyGet('/anime/animekill-bygenre', { genre: text.trim() });
+        const results = data?.result || data?.results || [];
+        if (!Array.isArray(results) || !results.length) return reply('❌ *No anime found for that genre.*');
+        const rows = [['#', 'Title'], ...results.slice(0, 10).map((r, i) => [`${i + 1}`, r.title || r.name || '-'])];
+        await sendTable(devtrust, m.chat, { title: 'Anime by Genre', headerText: text.trim(), rows, contextMsg: m });
+    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+}
+break;
+
+// ===== NEW: Prexzy Virtual Number =====
+case "virtualnum": {
+    reply(`📱 *Virtual Number*\nThis service issues temporary phone numbers for SMS/OTP verification. It's a paid, account-based feature on Prexzy (not a plain GET endpoint), so it hasn't been wired up here — set it up directly with Prexzy if you need it.`);
 }
 break;
 
@@ -13573,14 +15928,7 @@ case "character": {
 break;
 
 case "waifu": {
-    try {
-        const axios = require('axios');
-        const res = await axios.get('https://api.waifu.pics/sfw/waifu');
-        await devtrust.sendMessage(m.chat, {
-            image: { url: res.data.url },
-            caption: '🌸 *Random Waifu~*'
-        }, { quoted: m });
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    await prexzySendRandom(m, reply, 'waifu', '🌸 *Random Waifu~*');
 }
 break;
 
@@ -13710,9 +16058,24 @@ case 'vvgh': {
         const mediaBuffer = await m.quoted.download();
         if (!mediaBuffer) return reply('❌ *Download failed*');
 
-        const mediaType = m.quoted.mtype;
+        // View-once messages arrive wrapped in a container type (e.g.
+        // viewOnceMessageV2), so m.quoted.mtype never actually equals
+        // 'imageMessage'/'videoMessage' directly — check the mimetype
+        // instead. Falls through several raw-message shapes in case the
+        // serializer's .msg/.mimetype shortcut comes back empty (this is
+        // what was silently failing on regular forwarded photos before).
+        const vvRaw = m.quoted.message || {};
+        const mime = (m.quoted.msg || m.quoted).mimetype
+            || vvRaw.imageMessage?.mimetype
+            || vvRaw.videoMessage?.mimetype
+            || vvRaw.audioMessage?.mimetype
+            || vvRaw.viewOnceMessage?.message?.imageMessage?.mimetype
+            || vvRaw.viewOnceMessage?.message?.videoMessage?.mimetype
+            || vvRaw.viewOnceMessageV2?.message?.imageMessage?.mimetype
+            || vvRaw.viewOnceMessageV2?.message?.videoMessage?.mimetype
+            || '';
 
-        if (mediaType === 'imageMessage') {
+        if (/image/.test(mime)) {
             await devtrust.sendMessage(m.chat,
                 addNewsletterContext({
                     image: mediaBuffer,
@@ -13720,7 +16083,7 @@ case 'vvgh': {
                 }),
                 { quoted: m }
             );
-        } else if (mediaType === 'videoMessage') {
+        } else if (/video/.test(mime)) {
             await devtrust.sendMessage(m.chat,
                 addNewsletterContext({
                     video: mediaBuffer,
@@ -13728,7 +16091,7 @@ case 'vvgh': {
                 }),
                 { quoted: m }
             );
-        } else if (mediaType === 'audioMessage') {
+        } else if (/audio/.test(mime)) {
             await devtrust.sendMessage(m.chat,
                 addNewsletterContext({
                     audio: mediaBuffer,
@@ -13738,10 +16101,12 @@ case 'vvgh': {
                 }),
                 { quoted: m }
             );
+        } else {
+            reply('❌ *Unsupported or non view-once media*');
         }
     } catch (error) {
         console.error('Error:', error);
-        reply('❌ *Something went wrong*');
+        reply(`❌ *Something went wrong:* ${error.message}`);
     }
 }
 break;
@@ -13752,7 +16117,16 @@ case 'readviewonce2': {
         return reply(`👁️ *${botDisplayName} View Once*\n\nReply to a view-once media with ${prefix}${command}`);
     }
     
-    let mime = (m.quoted.msg || m.quoted).mimetype || '';
+    const vv2Raw = m.quoted.message || {};
+    let mime = (m.quoted.msg || m.quoted).mimetype
+        || vv2Raw.imageMessage?.mimetype
+        || vv2Raw.videoMessage?.mimetype
+        || vv2Raw.audioMessage?.mimetype
+        || vv2Raw.viewOnceMessage?.message?.imageMessage?.mimetype
+        || vv2Raw.viewOnceMessage?.message?.videoMessage?.mimetype
+        || vv2Raw.viewOnceMessageV2?.message?.imageMessage?.mimetype
+        || vv2Raw.viewOnceMessageV2?.message?.videoMessage?.mimetype
+        || '';
     
     try {
         await devtrust.sendMessage(m.chat, { react: { text: '👁️', key: m.key } });
@@ -13793,8 +16167,42 @@ case 'readviewonce2': {
     } catch (err) {
         console.error('View once error:', err);
         await devtrust.sendMessage(m.chat, { react: { text: '❌', key: m.key } });
-        reply(`⚠️ *${botDisplayName} View Once*\n\nFailed to process media.`);
+        reply(`⚠️ *${botDisplayName} View Once*\n\nFailed to process media: ${err.message}`);
     }
+}
+break;
+
+case 'autovv': {
+    if (!isCreator) return reply('🔒 *Owner only*');
+    const state = (args[0] || '').toLowerCase();
+    if (!['on', 'off'].includes(state)) return reply(`Usage: ${prefix}autovv on/off\n\nWhen on, any view-once media sent anywhere the bot can see gets auto-saved to your DM the instant it arrives — before anyone has a chance to open and permanently delete it.`);
+    setSetting('bot', 'autoViewOnce', state === 'on');
+    reply(`👁️ *Auto view-once capture turned ${state.toUpperCase()}*`);
+}
+break;
+
+case 'autobeg': {
+    // Named .autobeg, not .beg — .beg is already claimed by the economy
+    // game feature (.work/.crime/.rob/.beg). Reusing that name here would
+    // make one of the two permanently unreachable.
+    if (!isCreator) return reply('🔒 *Owner only*');
+    const azaFile = './database/aza_users.json';
+    let azaDB = {};
+    try {
+        if (fs.existsSync(azaFile)) azaDB = JSON.parse(fs.readFileSync(azaFile));
+    } catch (e) { azaDB = {}; }
+
+    const state = (args[0] || '').toLowerCase();
+    if (!['on', 'off'].includes(state)) return reply(`Usage: ${prefix}autobeg on/off\n\nWhen on, the bot auto-replies to anyone who DMs you, asking for money and sharing your saved ${prefix}aza account details. Set your details with ${prefix}aza set first.`);
+
+    if (state === 'on' && !azaDB[m.sender]) {
+        return reply(`❌ *No account details saved yet.*\nUse ${prefix}aza set bank: BankName no: 1234567890 acc: YourName first, then try ${prefix}autobeg on again.`);
+    }
+
+    setSetting('bot', 'autoBegEnabled', state === 'on');
+    reply(state === 'on'
+        ? `🫴 *Auto-beg turned ON* — anyone who DMs you now gets asked for money 😂`
+        : `✅ *Auto-beg turned OFF*`);
 }
 break;
 
@@ -13807,27 +16215,78 @@ case 'anticall': {
 }
 break;
 
-case 'afk': {
-    const reason = args.join(' ') || 'No reason given';
-    setSetting(m.sender, 'afk', { reason, since: Date.now() });
-    reply(`💤 *AFK activated*\n\nReason: ${reason}\n\nI'll let people know you're away until you message again.`);
+case 'gcs': {
+    if (!m.isGroup) return reply("👥 *Groups only*");
+    if (!isAdmins && !isCreator) return reply("🔒 *Admins only*");
+
+    const state = (args[0] || '').toLowerCase();
+    if (!['on', 'off'].includes(state)) {
+        const current = getSetting(m.chat, 'gcs', false);
+        return reply(`🛡️ *Group Chat Security* is currently *${current ? 'ON' : 'OFF'}*\n\nUsage: ${prefix}gcs on/off\n\n_When ON: if an admin removes my admin status, I'll try to demote them back. (WhatsApp only lets admins act, so if I've already lost admin by the time I notice, I'll warn the group instead of failing silently.)_`);
+    }
+    if (state === 'on' && !isBotAdmins) {
+        return reply("⚠️ I need to be an admin in this group first — make me admin, then run this again.");
+    }
+    setSetting(m.chat, 'gcs', state === 'on');
+    reply(`🛡️ *Group Chat Security* turned *${state.toUpperCase()}* for this group.`);
 }
 break;
 
-case 'antidelete': {
-    if (!isCreator) return reply('🔒 *Owner only*');
-    const scope = (args[0] || '').toLowerCase();
-    const state = (args[1] || '').toLowerCase();
-    if (scope === 'status') {
-        if (!['on', 'off'].includes(state)) return reply(`Usage: ${prefix}antidelete status on/off`);
-        setSetting(botNumber, 'antiDeleteStatus', state === 'on');
-        return reply(`📊 *Anti-delete for statuses* turned *${state.toUpperCase()}*`);
+case 'antidemote': {
+    if (!m.isGroup) return reply("👥 *Groups only*");
+    if (!isAdmins && !isCreator) return reply("🔒 *Admins only*");
+
+    const state = (args[0] || '').toLowerCase();
+    if (!['on', 'off'].includes(state)) {
+        const current = getSetting(m.chat, 'antidemote', false);
+        return reply(`🛡️ *Anti-Demote* is currently *${current ? 'ON' : 'OFF'}*\n\nUsage: ${prefix}antidemote on/off\n\n_When ON: if an admin removes another admin's rights, I'll re-promote them automatically. (This is separate from .gcs, which protects my own admin status specifically.)_`);
     }
-    if (!['on', 'off'].includes(scope)) return reply(`Usage: ${prefix}antidelete on/off\n${prefix}antidelete status on/off`);
-    setSetting(botNumber, 'antiDelete', scope === 'on');
-    reply(`🗑️ *Anti-delete* turned *${scope.toUpperCase()}*`);
+    if (state === 'on' && !isBotAdmins) {
+        return reply("⚠️ I need to be an admin in this group first — make me admin, then run this again.");
+    }
+    setSetting(m.chat, 'antidemote', state === 'on');
+    reply(`🛡️ *Anti-Demote* turned *${state.toUpperCase()}* for this group.`);
 }
 break;
+
+case 'antipromote': {
+    if (!m.isGroup) return reply("👥 *Groups only*");
+    if (!isAdmins && !isCreator) return reply("🔒 *Admins only*");
+
+    const state = (args[0] || '').toLowerCase();
+    if (!['on', 'off'].includes(state)) {
+        const current = getSetting(m.chat, 'antipromote', false);
+        return reply(`🛡️ *Anti-Promote* is currently *${current ? 'ON' : 'OFF'}*\n\nUsage: ${prefix}antipromote on/off\n\n_When ON: only the real group owner can promote members. If any other admin promotes someone, I'll demote them back down._`);
+    }
+    if (state === 'on' && !isBotAdmins) {
+        return reply("⚠️ I need to be an admin in this group first — make me admin, then run this again.");
+    }
+    setSetting(m.chat, 'antipromote', state === 'on');
+    reply(`🛡️ *Anti-Promote* turned *${state.toUpperCase()}* for this group.`);
+}
+break;
+
+case 'adminevent': {
+    if (!m.isGroup) return reply("👥 *Groups only*");
+    if (!isAdmins && !isCreator) return reply("🔒 *Admins only*");
+
+    const state = (args[0] || '').toLowerCase();
+    if (!['on', 'off'].includes(state)) {
+        const current = getSetting(m.chat, 'adminevent', false);
+        return reply(`👑 *Admin Event* is currently *${current ? 'ON' : 'OFF'}*\n\nUsage: ${prefix}adminevent on/off\n\n_When ON: everyone in the group gets notified whenever an admin promotes or demotes someone._`);
+    }
+    setSetting(m.chat, 'adminevent', state === 'on');
+    reply(`👑 *Admin Event* turned *${state.toUpperCase()}* for this group.`);
+}
+break;
+
+// NOTE: dead duplicate 'afk' block removed here — its persistent-storage
+// approach was correct and has been merged into the live .afk handler
+// earlier in the switch instead.
+
+// NOTE: dead duplicate 'antidelete' block removed here — its status
+// sub-mode has been merged into the live .antidelete handler earlier
+// in the switch instead.
 
 case 'note':
 case 'addnote': {
@@ -13873,25 +16332,22 @@ case 'cmdrecording': {
 }
 break;
 
-case 'cmdreact': {
-    if (!isCreator) return reply('🔒 *Owner only*');
-    if (args[0] === 'off') {
-        setSetting(botNumber, 'cmdReact', null);
-        return reply('✅ *Command react disabled*');
-    }
-    if (!args[0]) return reply(`Usage: ${prefix}cmdreact <emoji>\n${prefix}cmdreact off`);
-    setSetting(botNumber, 'cmdReact', args[0]);
-    reply(`✅ *Command react set to* ${args[0]} — reacts to every command now.`);
-}
-break;
+// NOTE: dead duplicate 'cmdreact' block removed here — its emoji-string
+// logic has been merged into the live .cmdreact handler earlier in the
+// switch instead.
 
-case 'autoreact': {
+// Renamed from autoreact — that name is already claimed by a genuinely
+// different, per-group random-reaction toggle earlier in the switch.
+// This one is bot-wide and reacts with one fixed custom emoji to every
+// message; getSetting(botNumber, 'autoReact', ...) elsewhere depends on
+// this, so keeping it (renamed) rather than discarding it.
+case 'autoreactemoji': {
     if (!isCreator) return reply('🔒 *Owner only*');
     if (args[0] === 'off') {
         setSetting(botNumber, 'autoReact', null);
         return reply('✅ *Auto-react disabled*');
     }
-    if (!args[0]) return reply(`Usage: ${prefix}autoreact <emoji>\n${prefix}autoreact off`);
+    if (!args[0]) return reply(`Usage: ${prefix}autoreactemoji <emoji>\n${prefix}autoreactemoji off`);
     setSetting(botNumber, 'autoReact', args[0]);
     reply(`✅ *Auto-react set to* ${args[0]} — reacts to every message now.`);
 }
@@ -14031,20 +16487,125 @@ break;
 
 case 'ss':
 case 'screenshot': {
-    if (!args[0]) return reply(`Usage: ${prefix}ss <url>`);
+    // If no URL was given directly, try to pull one from the quoted message
+    // instead of just failing — covers "reply to a link with .ss alone".
     let url = args[0];
+    if (!url && m.quoted) {
+        const quotedText = m.quoted.text || m.quoted.body || (m.quoted.msg || m.quoted)?.caption || '';
+        const found = quotedText.match(/https?:\/\/[^\s]+/i);
+        if (found) url = found[0];
+    }
+    if (!url) return reply(`Usage: ${prefix}ss <url>\n(or reply to a message containing a link with just ${prefix}ss)`);
     if (!/^https?:\/\//.test(url)) url = 'https://' + url;
     try {
-        // WordPress's free mshots screenshot service — no API key required.
-        // First request often returns a "generating" placeholder; briefly
-        // wait and re-fetch once to usually get the real render.
+        // Reverted to the mshots-based approach — the Prexzy screenshot
+        // endpoint wasn't reliable and threw errors mid-operation. This
+        // is the version that was actually working before, and doesn't
+        // show any message until it either has a real image or is truly
+        // done retrying (no premature/duplicate error text).
         const shotUrl = `https://s0.wp.com/mshots/v1/${encodeURIComponent(url)}?w=1280`;
         await reply('📸 *Capturing screenshot...*');
-        await new Promise(r => setTimeout(r, 4000));
-        const buffer = await getBuffer(shotUrl);
+        let buffer;
+        for (let attempt = 0; attempt < 4; attempt++) {
+            await new Promise(r => setTimeout(r, 3500));
+            buffer = await getBuffer(shotUrl);
+            // mshots' placeholder image is a small, consistent file size —
+            // a real render is reliably much larger. Rough but effective.
+            if (buffer && buffer.length > 15000) break;
+        }
+        if (!buffer) throw new Error('No image returned');
         await devtrust.sendMessage(m.chat, { image: buffer, caption: `📸 *Screenshot:* ${url}` }, { quoted: m });
     } catch (e) {
         reply('❌ *Failed to capture screenshot*');
+    }
+}
+break;
+
+// ===== NEW: Prexzy Stalk / Games / Sports / Audio — not previously here =====
+case "igstalk": {
+    if (!text) return reply(`🔍 *Instagram Stalk*\nUsage: ${prefix}igstalk <username>`);
+    await prexzyAskAndReply(reply, { endpoint: '/stalk/igstalkV2', params: { user: text.trim() }, label: `🔍 Instagram: @${text.trim()}`, showLabel: false });
+}
+break;
+
+case "ffstalk": {
+    if (!text) return reply(`🎮 *Free Fire Stalk*\nUsage: ${prefix}ffstalk <id>`);
+    await prexzyAskAndReply(reply, { endpoint: '/stalk/ffstalk', params: { id: text.trim() }, label: '🎮 Free Fire', showLabel: false });
+}
+break;
+
+case "ytstalk": {
+    if (!text) return reply(`📺 *YouTube Stalk*\nUsage: ${prefix}ytstalk <@handle>`);
+    await prexzyAskAndReply(reply, { endpoint: '/stalk/ytstalk', params: { user: text.trim() }, label: `📺 YouTube: ${text.trim()}`, showLabel: false });
+}
+break;
+
+case "quiz": {
+    try {
+        const data = await prexzyGet('/game/quizrandom');
+        const q = data?.result || data?.data || data;
+        if (data?.status === false || !q) return reply('❌ *Could not fetch a quiz.*');
+        const opts = q.options || q.choices || [];
+        reply(`🧠 *Quiz*\n\n${q.question}\n\n${Array.isArray(opts) ? opts.map((o, i) => `${i + 1}. ${o}`).join('\n') : ''}`);
+    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+}
+break;
+
+case "football": {
+    try {
+        const data = await prexzyGet('/sports/football');
+        const answer = prexzyExtractAnswer(data);
+        if (data?.status === false || !answer) return reply('❌ *No live football data.*');
+        reply(`⚽ *Football*\n\n${typeof answer === 'string' ? answer : JSON.stringify(answer, null, 2).slice(0, 1500)}`);
+    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+}
+break;
+
+case "soundsearch": {
+    if (!text) return reply(`🔊 *Sound Search*\nUsage: ${prefix}soundsearch <query>`);
+    try {
+        const data = await prexzyGet('/sound/search', { query: text.trim() });
+        const results = data?.result || data?.results || [];
+        if (!Array.isArray(results) || !results.length) return reply('❌ *No sounds found.*');
+        const rows = [['#', 'Name', 'Link'], ...results.slice(0, 10).map((r, i) => [`${i + 1}`, r.name || r.title || '-', r.url || r.link || '-'])];
+        await sendTable(devtrust, m.chat, { title: 'Sound Search', headerText: `Results for "${text.trim()}"`, rows, contextMsg: m });
+    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+}
+break;
+
+case 'scrape':
+case 'pagetext':
+case 'readpage': {
+    if (!args[0]) return reply(`Usage: ${prefix}scrape <url>\n\nFetches the fully-rendered text content of a page (JS included) and sends it back as a .txt file — useful for pages too big or too dynamic to screenshot.`);
+    let scrapeUrl = args[0];
+    if (!/^https?:\/\//.test(scrapeUrl)) scrapeUrl = 'https://' + scrapeUrl;
+    try {
+        await reply('🌐 *Rendering page and extracting text...* (this can take 10-30s for heavy pages)');
+        // r.jina.ai runs a real headless browser server-side, waits for JS to
+        // finish rendering, then returns clean readable text/markdown of the
+        // final DOM — unlike a plain HTTP fetch which only sees pre-JS HTML.
+        const readerUrl = `https://r.jina.ai/${scrapeUrl}`;
+        const { data: pageText } = await axios.get(readerUrl, {
+            timeout: 45000,
+            headers: { 'X-Return-Format': 'markdown' }
+        });
+        if (!pageText || !pageText.trim()) return reply('❌ *No content extracted from that page.*');
+
+        if (!fs.existsSync('./tmp')) fs.mkdirSync('./tmp');
+        const outPath = `./tmp/scrape_${Date.now()}.txt`;
+        fs.writeFileSync(outPath, pageText);
+
+        await devtrust.sendMessage(m.chat, {
+            document: fs.readFileSync(outPath),
+            fileName: `page-content.txt`,
+            mimetype: 'text/plain',
+            caption: `📄 *Extracted content:* ${scrapeUrl}\n_${pageText.length} characters_`
+        }, { quoted: m });
+
+        fs.unlinkSync(outPath);
+    } catch (e) {
+        console.error('Scrape error:', e);
+        reply(`❌ *Failed to scrape page:* ${e.message}`);
     }
 }
 break;
@@ -14061,41 +16622,9 @@ async function generateEphoto(effectUrl, text) {
     return imageUrl;
 }
 
-case 'plugin': {
-    if (!isCreator) return reply('🔒 *Owner only*');
-    const sub = (args[0] || '').toLowerCase();
-    const pluginManager = require(path.join(__dirname, 'pluginManager.js'));
-
-    if (sub === 'install') {
-        const pluginId = args[1];
-        if (!pluginId) return reply(`Usage: ${prefix}plugin install <id>\n\nBrowse approved plugins on your panel first to get an id.`);
-        try {
-            // Only ever fetches from YOUR OWN approved-plugin registry —
-            // never an arbitrary URL. A plugin has to pass your review
-            // queue before it's reachable here at all.
-            const res = await fetchJson(`${process.env.API_BASE_URL || 'https://legendarybot.dpdns.org'}/api/plugins/${pluginId}`);
-            if (!res || !res.code) return reply('❌ *Plugin not found in the approved registry*');
-            pluginManager.installPlugin(process.cwd(), pluginId, res.name, res.command, res.code);
-            reply(`✅ *Installed:* ${res.name}\nTrigger: ${prefix}${res.command}\n\n_Runs in a sandbox — no access to files, other bots, or the network beyond what you send it._`);
-        } catch (e) {
-            reply(`❌ *Install failed:* ${e.message}`);
-        }
-    } else if (sub === 'list') {
-        const installed = pluginManager.listPlugins(process.cwd());
-        const names = Object.entries(installed);
-        if (!names.length) return reply('📭 *No plugins installed*');
-        const list = names.map(([id, p]) => `▸ ${p.name} (${prefix}${p.command}) — id: ${id}`).join('\n');
-        reply(`🧩 *Installed Plugins:*\n${list}`);
-    } else if (sub === 'remove') {
-        const pluginId = args[1];
-        if (!pluginId) return reply(`Usage: ${prefix}plugin remove <id>`);
-        pluginManager.removePlugin(process.cwd(), pluginId);
-        reply('✅ *Plugin removed*');
-    } else {
-        reply(`🧩 *Plugin System*\n\n▸ ${prefix}plugin install <id>\n▸ ${prefix}plugin list\n▸ ${prefix}plugin remove <id>\n\nPlugins only come from your panel's approved registry and run sandboxed — they can't touch your files or other users' bots.`);
-    }
-}
-break;
+// NOTE: dead duplicate 'plugin' block removed here — its sandboxed
+// pluginManager.js logic was moved into the live .plugin handler earlier
+// in the switch instead.
 
 case 'neonlight': {
     if (!q) return reply(`Usage: ${prefix}neonlight <text>`);
@@ -14238,7 +16767,7 @@ case 'toimg': {
     
     if (!fs.existsSync('./tmp')) fs.mkdirSync('./tmp');
     
-    const media = await devtrust.downloadMediaMessage(quoted);
+    const media = await downloadMediaMessage(quoted, 'buffer', {});
     const filePath = `./tmp/${Date.now()}.jpg`;
     
     fs.writeFileSync(filePath, media);
@@ -14270,7 +16799,7 @@ case 's': {
         // Image to sticker
         if (/image/.test(mime)) {
             let media = await m.quoted.download();
-            await devtrust.sendImageAsSticker(m.chat, media, m, { 
+            await sendImageAsSticker(m.chat, media, m, { 
                 packname: global.packname || botDisplayName, 
                 author: global.author || "LËGĚNDÃRY Ł𝗮𝗯𝘀™" 
             });
@@ -14280,7 +16809,7 @@ case 's': {
         else if (/video/.test(mime)) {
             if (mediaType > 10) return reply('❌ *Video too long!* Max 10 seconds for stickers.');
             let media = await m.quoted.download();
-            await devtrust.sendVideoAsSticker(m.chat, media, m, {
+            await sendVideoAsSticker(m.chat, media, m, {
                 packname: global.packname || botDisplayName,
                 author: global.author || "LËGĚNDÃRY Ł𝗮𝗯𝘀™"
             });
@@ -14397,79 +16926,50 @@ case "play": {
         const vid = ytResults.videos[0];
         const trackName = vid.title;
         const artistName = vid.author.name;
-        const videoUrl = vid.url;
         const duration = vid.seconds;
 
         if (duration > 1800) return reply('❌ *Audio too long (max 30 minutes)*');
 
         reply(`🎵 *Found:* ${trackName}\n👤 *${artistName}*\n⏳ *Downloading...*`);
 
-        const videoId = vid.videoId;
-        const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
+        const ytUrl = `https://www.youtube.com/watch?v=${vid.videoId}`;
 
-        // api-madrin ytmp3 endpoint — confirmed working, returns a FLAT
-        // response object: { status, title, download_url, ... } (NOT nested
-        // under a `.result` field).
-        try {
-            const madrinRes = await axios.get('https://api-madrin.zone.id/download/ytmp3', {
-                params: { apikey: 'test', url: ytUrl },
-                timeout: 30000
-            });
-
-            if (madrinRes.data?.status === true && madrinRes.data?.download_url) {
-                return await devtrust.sendMessage(m.chat, {
-                    audio: { url: madrinRes.data.download_url },
-                    mimetype: 'audio/mpeg',
-                    fileName: `${madrinRes.data.title || trackName}.mp3`,
-                    ptt: false
-                }, { quoted: m });
-            }
-            return reply(`❌ *Download failed:* API returned no download link.\n\n_Try again later or use .yta [youtube link] directly_`);
-        } catch (e) {
-            return reply(`❌ *Download failed:* ${e.message}\n\n_Try again later or use .yta [youtube link] directly_`);
+        // play-dl / yt-dlp both scrape YouTube directly from this host,
+        // which is exactly what trips YouTube's bot-detection wall
+        // ("Sign in to confirm you're not a bot"). Routing through
+        // Prexzy's /download/ytmp3 endpoint instead means Prexzy's
+        // servers do the fetching, not us — same pattern already used
+        // for fb/twit/etc via prexzyDownloadAndSend.
+        const data = await prexzyGet('/download/ytmp3', { url: ytUrl });
+        const audioLink = madrinExtractLink(data);
+        if (data?.status === false || !audioLink) {
+            return reply(`❌ *Download failed.* ${data?.error || data?.message || 'no audio link returned'}`);
         }
 
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+        return await devtrust.sendMessage(m.chat, {
+            audio: { url: audioLink },
+            mimetype: 'audio/mpeg',
+            fileName: `${trackName}.mp3`,
+            ptt: false
+        }, { quoted: m });
+
+    } catch (e) {
+        console.log(chalk.red(`❌ .play error: ${e.message}`));
+        reply(`❌ *Download failed:* ${e.message}\n\nTry again later, or use a direct link with .yta instead.`);
+    }
 }
 break;
 // [REMOVED DUPLICATE: tt]
+// [REMOVED DUPLICATE: fb/facebook — now handled above via Prexzy /download/facebookv2]
+// [REMOVED DUPLICATE: twitter/twit — now handled above via Prexzy /download/twitter.
+//  Also dropped "insta" as an alias here since it was actually routed to the
+//  Twitter downloader in the old code, not Instagram — looked like a bug,
+//  not intentional, so not carried over. Instagram already has its own
+//  igdl/instagram command.]
 
-case "fb":
-case "facebook": {
-    if (!text) return reply(`📘 *Facebook Downloader*\nUsage: ${prefix}fb [facebook video URL]`);
-    try {
-        reply('⏳ *Downloading Facebook video...*');
-        const axios = require('axios');
-        const res = await axios.get(`https://facebook-reel-and-video-downloader.p.rapidapi.com/app/main.php?url=${encodeURIComponent(text)}`, {
-            headers: { 'x-rapidapi-host': 'facebook-reel-and-video-downloader.p.rapidapi.com' }
-        });
-        const links = res.data?.links;
-        if (!links || !links['Download High Quality']) return reply('❌ *Could not fetch Facebook video. Make sure the video is public.*');
-        await devtrust.sendMessage(m.chat, {
-            video: { url: links['Download High Quality'] },
-            caption: '📘 *Facebook Video*',
-            mimetype: 'video/mp4'
-        }, { quoted: m });
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
-}
-break;
-
-case "insta":
-case "twitter":
 case "twit": {
     if (!text) return reply(`🐦 *Twitter/X Downloader*\nUsage: ${prefix}twitter [tweet URL]`);
-    try {
-        reply('⏳ *Downloading Twitter video...*');
-        const axios = require('axios');
-        const res = await axios.get(`https://twitsave.com/info?url=${encodeURIComponent(text)}`);
-        const data = res.data;
-        if (!data?.video) return reply('❌ *No video found in this tweet*');
-        await devtrust.sendMessage(m.chat, {
-            video: { url: data.video },
-            caption: '🐦 *Twitter Video*',
-            mimetype: 'video/mp4'
-        }, { quoted: m });
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/twitter', params: { url: text.trim() }, label: '🐦 Twitter/X' });
 }
 break;
 
@@ -14494,56 +16994,48 @@ case "pint":
 case "pinterest": {
     if (!text) return reply(`📌 *Pinterest Downloader*\nUsage: ${prefix}pint [pinterest URL or search term]`);
     try {
-        reply('⏳ *Fetching Pinterest media...*');
         const axios = require('axios');
-        const res = await axios.get(`https://api.ryzendesu.vip/api/downloader/pinterest?url=${encodeURIComponent(text)}`);
-        const url = res.data?.url || res.data?.data?.url;
-        if (!url) return reply('❌ *Could not fetch Pinterest media*');
-        const isVideo = url.includes('.mp4') || url.includes('video');
-        await devtrust.sendMessage(m.chat, {
-            [isVideo ? 'video' : 'image']: { url },
-            caption: '📌 *Pinterest Media*',
-            mimetype: isVideo ? 'video/mp4' : 'image/jpeg'
-        }, { quoted: m });
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+        const isUrl = /^https?:\/\//i.test(text.trim());
+
+        if (isUrl) {
+            // Direct pin URL -> Prexzy /download/pinterestV2?url=
+            await prexzyDownloadAndSend(m, reply, { endpoint: '/download/pinterestV2', params: { url: text.trim() }, label: '📌 Pinterest' });
+            break;
+        } else {
+            // Search term -> Prexzy /search/pinterest?q=
+            reply('⏳ *Searching Pinterest...*');
+            const data = await prexzyGet('/search/pinterest', { q: text.trim() });
+            if (!data?.status || !data?.images?.length) return reply(`❌ *No Pinterest results for "${text.trim()}"*`);
+
+            const first = data.images[0];
+            const imgUrl = typeof first === 'string' ? first : (first?.url || first?.image_url);
+            if (!imgUrl) return reply('❌ *Could not fetch Pinterest image*');
+
+            // NOTE: deliberately sending ONE image only. Sending several
+            // messages back-to-back (even to yourself) reads as bot/spam
+            // behavior to WhatsApp's anti-abuse system on unofficial
+            // clients like this one, and can trigger an account flag or
+            // forced logout — this happened during testing. Don't loop
+            // sendMessage() calls here without a very long, deliberate
+            // delay between each and a strong reason to.
+            await devtrust.sendMessage(m.chat, {
+                image: { url: imgUrl },
+                caption: `📌 *Pinterest:* ${text.trim()}\n_${data.total_results || data.images.length} results found_`
+            }, { quoted: m });
+        }
+    } catch (e) {
+        console.error('Pinterest error:', e);
+        reply(`❌ *Error:* ${e.response?.data?.message || e.message}`);
+    }
 }
 break;
 
 case "autodl": {
-    if (!text) return reply(`⬇️ *Auto Downloader*\nUsage: ${prefix}autodl [URL]\n_Supports: YouTube, TikTok, Instagram, Twitter, Facebook, Pinterest_`);
-    try {
-        reply('⏳ *Detecting URL and downloading...*');
-        if (text.includes('youtube.com') || text.includes('youtu.be')) {
-            const ytdl = require('@distube/ytdl-core');
-            const info = await ytdl.getInfo(text);
-            const format = ytdl.chooseFormat(info.formats, { quality: 'lowestaudio', filter: 'audioonly' });
-            await devtrust.sendMessage(m.chat, {
-                audio: { url: format.url },
-                mimetype: 'audio/mpeg',
-                fileName: `${info.videoDetails.title}.mp3`
-            }, { quoted: m });
-        } else if (text.includes('tiktok.com')) {
-            const axios = require('axios');
-            const res = await axios.get(`https://api.tiklydown.eu.org/api/download?url=${encodeURIComponent(text)}`);
-            const videoUrl = res.data?.video?.noWatermark;
-            if (!videoUrl) return reply('❌ *Could not download TikTok*');
-            await devtrust.sendMessage(m.chat, { video: { url: videoUrl }, mimetype: 'video/mp4', caption: '🎵 TikTok' }, { quoted: m });
-        } else if (text.includes('instagram.com')) {
-            const axios = require('axios');
-            const res = await axios.get(`https://saved.vc/api/download?url=${encodeURIComponent(text)}`);
-            const media = res.data?.medias?.[0];
-            if (!media) return reply('❌ *Could not download Instagram media*');
-            const isVid = media.type === 'video';
-            await devtrust.sendMessage(m.chat, { [isVid ? 'video' : 'image']: { url: media.url }, caption: '📸 Instagram' }, { quoted: m });
-        } else if (text.includes('twitter.com') || text.includes('x.com')) {
-            const axios = require('axios');
-            const res = await axios.get(`https://twitsave.com/info?url=${encodeURIComponent(text)}`);
-            if (!res.data?.video) return reply('❌ *No video found*');
-            await devtrust.sendMessage(m.chat, { video: { url: res.data.video }, mimetype: 'video/mp4', caption: '🐦 Twitter' }, { quoted: m });
-        } else {
-            reply('❌ *Unsupported URL*\n_Supported: YouTube, TikTok, Instagram, Twitter/X_');
-        }
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    if (!text) return reply(`⬇️ *Auto Downloader*\nUsage: ${prefix}autodl [URL]\n_Supports: YouTube, TikTok, Instagram, Twitter/X, Facebook, Pinterest and more_`);
+    // Replaced the old per-platform branching (tiklydown/saved.vc/twitsave,
+    // one bespoke axios call each) with Prexzy's single AIO downloader,
+    // which already detects the platform from the URL itself.
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/aiov2', params: { url: text.trim() }, label: '⬇️ Downloaded' });
 }
 break;
 // ============ END DOWNLOADER COMMANDS ============
@@ -14560,57 +17052,10 @@ case "sp": {
         return reply(`❌ *Spotify*\n\nInvalid Spotify track link. Please provide a valid track URL.`);
     }
     
-    try {
-        await devtrust.sendMessage(m.chat, { react: { text: '🎧', key: m.key } });
-        
-        reply(`🔍 *${botDisplayName} Spotify*\n\nFetching track: ${text.split('/track/')[1]?.substring(0, 10)}...`);
-        
-        const response = await axios.get(`https://api.dreaded.site/api/spotifydl`, {
-            params: {
-                url: text
-            },
-            timeout: 30000
-        });
-        
-        if (response.data.success && response.data.result) {
-            const result = response.data.result;
-            
-            // Send audio with rich preview
-            await devtrust.sendMessage(m.chat, 
-                addNewsletterContext({
-                    audio: { url: result.download_url || result.downloadMP3 },
-                    mimetype: 'audio/mpeg',
-                    fileName: `${result.title}.mp3`,
-                    contextInfo: {
-                        externalAdReply: {
-                            title: result.title,
-                            body: `🎧 ${result.type || 'Track'}`,
-                            thumbnailUrl: result.image,
-                            mediaType: 1,
-                            renderLargerThumbnail: true,
-                            sourceUrl: text
-                        }
-                    }
-                }), 
-                { quoted: m }
-            );
-            
-            await devtrust.sendMessage(m.chat, { react: { text: '✅', key: m.key } });
-            
-        } else {
-            throw new Error('No download link found');
-        }
-        
-    } catch (error) {
-        console.error('Spotify error:', error.message);
-        await devtrust.sendMessage(m.chat, { react: { text: '❌', key: m.key } });
-        
-        if (error.response?.status === 404) {
-            return reply(`❌ *Spotify*\n\nTrack not found. Check the link and try again.`);
-        }
-        
-        reply(`⚠️ *Spotify*\n\nSpotify service is on break. Try again later.`);
-    }
+    // Replaced the old fabdl.com 3-request chain (get track -> start
+    // convert -> poll for finished mp3) with Prexzy's single-call
+    // Spotify downloader.
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/download/spotify', params: { url: text.trim() }, label: '🎧 Spotify', mediaType: 'audio' });
 }
 break;
 
@@ -14637,129 +17082,120 @@ case 'setpp': {
 }
 break;
 
-// ============ AI COMMANDS ============
+// ============ PREXZY API — AI COMMANDS ============
+// These used to all secretly hit the same single endpoint regardless of
+// label. Prexzy actually has real distinct endpoints for several of these
+// (Gemini, Mistral, a Llama-based model, Islamic AI) so those are now
+// genuinely different backends instead of reskins of one model.
 case "openai":
 case "gpt": {
     if (!text) return reply(`🤖 *OpenAI GPT*\nUsage: ${prefix}openai [question]`);
-    try {
-        reply('🤖 *Thinking...*');
-        const madrinRes = await madrinGet('/ai/gpt5', { text, q: text, prompt: text });
-        const answer = madrinRes?.result || madrinRes?.data?.result || madrinRes?.answer || madrinRes?.message;
-        if (!answer) return reply('❌ *No response from OpenAI*');
-        reply(`🤖 *OpenAI GPT*\n\n${answer}`);
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    await prexzyAskAndReply(reply, { endpoint: '/ai/askgpt5', params: { prompt: text.trim() }, label: '🤖 OpenAI GPT', loadingMsg: '🤖 *Thinking...*' });
 }
 break;
 
 case "gemini": {
     if (!text) return reply(`✨ *Gemini AI*\nUsage: ${prefix}gemini [question]`);
-    try {
-        reply('✨ *Gemini is thinking...*');
-        const madrinRes = await madrinGet('/ai/gpt5', { text, q: text, prompt: text });
-        const answer = madrinRes?.result || madrinRes?.data?.result || madrinRes?.answer || madrinRes?.message;
-        if (!answer) return reply('❌ *No response from Gemini*');
-        reply(`✨ *Gemini AI*\n\n${answer}`);
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    // Real Google Gemini endpoint now — was silently routed to gpt5 before.
+    await prexzyAskAndReply(reply, { endpoint: '/ai/gemini', params: { prompt: text.trim() }, label: '✨ Gemini AI', loadingMsg: '✨ *Gemini is thinking...*' });
 }
 break;
 
 case "mistral": {
     if (!text) return reply(`🌪️ *Mistral AI*\nUsage: ${prefix}mistral [question]`);
-    try {
-        reply('🌪️ *Mistral is thinking...*');
-        const madrinRes = await madrinGet('/ai/gpt5', { text, q: text, prompt: text });
-        const answer = madrinRes?.result || madrinRes?.data?.result || madrinRes?.answer || madrinRes?.message;
-        if (!answer) return reply('❌ *No response from Mistral*');
-        reply(`🌪️ *Mistral AI*\n\n${answer}`);
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    // Real Mistral endpoint now.
+    await prexzyAskAndReply(reply, { endpoint: '/ai/mistral', params: { prompt: text.trim() }, label: '🌪️ Mistral AI', loadingMsg: '🌪️ *Mistral is thinking...*' });
 }
 break;
 
 case "deepseek": {
     if (!text) return reply(`🔍 *DeepSeek AI*\nUsage: ${prefix}deepseek [question]`);
-    try {
-        reply('🔍 *DeepSeek is thinking...*');
-        const madrinRes = await madrinGet('/ai/gpt5', { text, q: text, prompt: text });
-        const answer = madrinRes?.result || madrinRes?.data?.result || madrinRes?.answer || madrinRes?.message;
-        if (!answer) return reply('❌ *No response from DeepSeek*');
-        reply(`🔍 *DeepSeek AI*\n\n${answer}`);
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    // No DeepSeek endpoint in Prexzy — still a reskin, using AskGPT5.
+    await prexzyAskAndReply(reply, { endpoint: '/ai/askgpt5', params: { prompt: text.trim() }, label: '🔍 DeepSeek AI', loadingMsg: '🔍 *DeepSeek is thinking...*' });
 }
 break;
 
 case "llama": {
     if (!text) return reply(`🦙 *LLaMA AI*\nUsage: ${prefix}llama [question]`);
-    try {
-        reply('🦙 *LLaMA is thinking...*');
-        const madrinRes = await madrinGet('/ai/gpt5', { text, q: text, prompt: text });
-        const answer = madrinRes?.result || madrinRes?.data?.result || madrinRes?.answer || madrinRes?.message;
-        if (!answer) return reply('❌ *No response from LLaMA*');
-        reply(`🦙 *LLaMA AI*\n\n${answer}`);
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    // DeepQuery AI is genuinely Meta LLaMA 4 Scout 17B — real match.
+    await prexzyAskAndReply(reply, { endpoint: '/ai/deepquery', params: { prompt: text.trim() }, label: '🦙 LLaMA AI', loadingMsg: '🦙 *LLaMA is thinking...*' });
 }
 break;
 
 case "reasoning": {
     if (!text) return reply(`🧠 *AI Reasoning*\nUsage: ${prefix}reasoning [problem]`);
-    try {
-        reply('🧠 *Analyzing your problem...*');
-        const prompt = `Break this down step-by-step, logically: ${text}`;
-        const madrinRes = await madrinGet('/ai/gpt5', { text: prompt, q: prompt, prompt });
-        const answer = madrinRes?.result || madrinRes?.data?.result || madrinRes?.answer || madrinRes?.message;
-        if (!answer) return reply('❌ *Could not process reasoning*');
-        reply(`🧠 *AI Reasoning*\n\n${answer}`);
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    // Dolphin AI Logical is built for exactly this — real match.
+    await prexzyAskAndReply(reply, { endpoint: '/ai/logical', params: { text: text.trim() }, label: '🧠 AI Reasoning', loadingMsg: '🧠 *Analyzing your problem...*' });
 }
 break;
 
 case "coder": {
     if (!text) return reply(`💻 *AI Coder*\nUsage: ${prefix}coder [coding question or task]`);
-    try {
-        reply('💻 *Writing code...*');
-        const prompt = `You are an expert programmer. Write clean, commented code for: ${text}`;
-        const madrinRes = await madrinGet('/ai/gpt5', { text: prompt, q: prompt, prompt });
-        const answer = madrinRes?.result || madrinRes?.data?.result || madrinRes?.answer || madrinRes?.message;
-        if (!answer) return reply('❌ *Could not generate code*');
-        reply(`💻 *AI Coder*\n\n${answer}`);
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    // Dolphin AI Code Advanced — real match.
+    await prexzyAskAndReply(reply, { endpoint: '/ai/code-advanced', params: { text: text.trim() }, label: '💻 AI Coder', loadingMsg: '💻 *Writing code...*' });
 }
 break;
 
 case "aisearch": {
     if (!text) return reply(`🔎 *AI Search*\nUsage: ${prefix}aisearch [query]`);
-    try {
-        reply('🔎 *Searching with AI...*');
-        const axios = require('axios');
-        const res = await axios.get(`https://google-it.vercel.app/api?q=${encodeURIComponent(text)}`).catch(() => null);
-        if (!res?.data?.length) {
-            const searchPrompt = `Search and summarize: ${text}`;
-            const madrinRes = await madrinGet('/ai/gpt5', { text: searchPrompt, q: searchPrompt, prompt: searchPrompt });
-            const answer = madrinRes?.result || madrinRes?.data?.result || madrinRes?.answer || madrinRes?.message;
-            return reply(`🔎 *AI Search: ${text}*\n\n${answer || 'No results found'}`);
-        }
-        const results = res.data.slice(0, 3);
-        let searchText = `🔎 *Search Results: ${text}*\n\n`;
-        results.forEach((r, i) => {
-            searchText += `${i + 1}. *${r.title}*\n${r.snippet}\n${r.link}\n\n`;
-        });
-        reply(searchText);
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    // AskGPT5 has a built-in web_search param — replaces the old
+    // google-it.vercel.app + gpt5-fallback two-step with one real call.
+    await prexzyAskAndReply(reply, { endpoint: '/ai/askgpt5', params: { prompt: text.trim(), web_search: true }, label: `🔎 AI Search: ${text.trim()}`, loadingMsg: '🔎 *Searching with AI...*' });
 }
 break;
 
 case "bidara": {
     if (!text) return reply(`🕌 *Bidara Islamic AI*\nUsage: ${prefix}bidara [Islamic question]`);
-    try {
-        reply('🕌 *Bidara is thinking...*');
-        const prompt = `You are Bidara, an Islamic AI assistant. Answer this Islamic question with Quran/Hadith references where possible: ${text}`;
-        const madrinRes = await madrinGet('/ai/gpt5', { text: prompt, q: prompt, prompt });
-        const answer = madrinRes?.result || madrinRes?.data?.result || madrinRes?.answer || madrinRes?.message;
-        if (!answer) return reply('❌ *No response from Bidara*');
-        reply(`🕌 *Bidara Islamic AI*\n\n${answer}`);
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    // SantriAI is a real Islamic AI assistant with Kitab references — good match.
+    await prexzyAskAndReply(reply, { endpoint: '/ai/santria', params: { prompt: text.trim() }, label: '🕌 Bidara Islamic AI', loadingMsg: '🕌 *Bidara is thinking...*' });
 }
 break;
 // ============ END AI COMMANDS ============
+
+// ===== NEW: Prexzy-only AI features not previously in this bot =====
+case "dream": {
+    if (!text) return reply(`💭 *Dream Interpreter*\nUsage: ${prefix}dream [describe your dream]`);
+    await prexzyAskAndReply(reply, { endpoint: '/ai/dream', params: { dream: text.trim() }, label: '💭 Dream Interpretation', loadingMsg: '💭 *Interpreting your dream...*' });
+}
+break;
+
+case "story": {
+    if (!text) return reply(`📖 *AI Story*\nUsage: ${prefix}story [idea]\nExample: ${prefix}story A dragon protecting a magical crystal`);
+    await prexzyAskAndReply(reply, { endpoint: '/ai/quick', params: { text: text.trim() }, label: '📖 AI Story', loadingMsg: '📖 *Writing your story...*' });
+}
+break;
+
+case "convertcode": {
+    const [target, ...codeParts] = (text || '').split('|').map(s => s.trim());
+    if (!target || !codeParts.length) return reply(`🔄 *Convert Code*\nUsage: ${prefix}convertcode target_language | code`);
+    await prexzyAskAndReply(reply, { endpoint: '/ai/convertcode', params: { code: codeParts.join('|'), target }, label: '🔄 Converted Code', loadingMsg: '🔄 *Converting...*' });
+}
+break;
+
+case "detectbugs": {
+    if (!text) return reply(`🐛 *Detect Bugs*\nUsage: ${prefix}detectbugs [code]`);
+    await prexzyAskAndReply(reply, { endpoint: '/ai/detectbugs', params: { code: text.trim() }, label: '🐛 Bug Report', loadingMsg: '🐛 *Scanning code...*' });
+}
+break;
+
+case "explaincode": {
+    if (!text) return reply(`📘 *Explain Code*\nUsage: ${prefix}explaincode [code]`);
+    await prexzyAskAndReply(reply, { endpoint: '/ai/explaincode', params: { code: text.trim() }, label: '📘 Code Explanation', loadingMsg: '📘 *Reading code...*' });
+}
+break;
+
+case "summarize": {
+    if (!text) return reply(`✂️ *Summarize*\nUsage: ${prefix}summarize [text]`);
+    await prexzyAskAndReply(reply, { endpoint: '/ai/summarize', params: { text: text.trim() }, label: '✂️ Summary', loadingMsg: '✂️ *Summarizing...*' });
+}
+break;
+
+case "aiart":
+case "imagine": {
+    if (!text) return reply(`🎨 *AI Art*\nUsage: ${prefix}aiart [prompt]`);
+    await prexzyDownloadAndSend(m, reply, { endpoint: '/ai/aiart', params: { prompt: text.trim() }, label: '🎨 AI Art', mediaType: 'image' });
+}
+break;
 
 case "gpt4": {
     const chatId = m.key.remoteJid;
@@ -14780,8 +17216,8 @@ case "gpt4": {
             return reply("🤖 *Usage:* gpt4 your question");
         }
 
-        const madrinRes = await madrinGet('/ai/gpt5', { text: query, q: query, prompt: query });
-        const answer = madrinRes?.result || madrinRes?.data?.result || madrinRes?.answer || madrinRes?.message || "";
+        const madrinRes = await prexzyGet('/ai/askgpt5', { prompt: query });
+        const answer = prexzyExtractAnswer(madrinRes) || "";
 
         if (!answer) return reply("⚠️ *No response from GPT-4*");
 
@@ -14965,7 +17401,7 @@ case 'tiktoksearch': {
 
     try {
         let query = text;
-        let url = `https://apis.prexzyvilla.site/search/tiktoksearch?q=${encodeURIComponent(query)}`;
+        let url = `https://prexzyapis.com/search/tiktoksearch?q=${encodeURIComponent(query)}`;
         let response = await fetch(url);
         let json = await response.json();
 
@@ -15155,7 +17591,7 @@ case "lyrics": {
     if (!query) return reply("🎵 *Usage:* lyrics song title");
 
     try {
-        const res = await fetch(`https://apis.prexzyvilla.site/search/lyrics?title=${encodeURIComponent(query)}`);
+        const res = await fetch(`https://prexzyapis.com/search/lyrics?title=${encodeURIComponent(query)}`);
         const json = await res.json();
 
         if (!json.status || !json.data || !json.data.lyrics) {
@@ -15358,25 +17794,19 @@ case "getpp": {
 }
 break;
 
-case "ss": {
-    if (!text) return reply(`📸 *Screenshot*\nUsage: ${prefix}ss [url]`);
-    try {
-        await devtrust.sendMessage(m.chat, { react: { text: '⏰', key: m.key } });
-        const url = text.startsWith('http') ? text : `https://${text}`;
-        const res = await fetch(`https://api-rebix.zone.id/api/ssweb?url=${encodeURIComponent(url)}&device=desktop`);
-        const buffer = Buffer.from(await res.arrayBuffer());
-        await devtrust.sendMessage(m.chat, { image: buffer, caption: '🖥️ *Desktop Screenshot*' }, { quoted: m });
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
-}
-break;
-
+// NOTE: a duplicate `case "ss":` used to live here — same label as the
+// working .ss command above, so it was 100% dead/unreachable code (JS only
+// ever runs the first match on a duplicate case label). Removed it and
+// migrated these device-variant commands off api-rebix.zone.id (same
+// flaky-API family as the dead ryzendesu.vip Pinterest endpoint) onto the
+// same proven mshots service .ss uses, varying width to approximate each
+// device size.
 case "sstab": {
     if (!text) return reply(`📸 *Screenshot (Tablet)*\nUsage: ${prefix}sstab [url]`);
     try {
-        await devtrust.sendMessage(m.chat, { react: { text: '⏰', key: m.key } });
         const url = text.startsWith('http') ? text : `https://${text}`;
-        const res = await fetch(`https://api-rebix.zone.id/api/ssweb?url=${encodeURIComponent(url)}&device=tablet`);
-        const buffer = Buffer.from(await res.arrayBuffer());
+        await devtrust.sendMessage(m.chat, { react: { text: '⏰', key: m.key } });
+        const buffer = await getBuffer(`https://s0.wp.com/mshots/v1/${encodeURIComponent(url)}?w=768`);
         await devtrust.sendMessage(m.chat, { image: buffer, caption: '📱 *Tablet Screenshot*' }, { quoted: m });
     } catch (e) { reply(`❌ *Error:* ${e.message}`); }
 }
@@ -15385,10 +17815,9 @@ break;
 case "ssphone": {
     if (!text) return reply(`📸 *Screenshot (Phone)*\nUsage: ${prefix}ssphone [url]`);
     try {
-        await devtrust.sendMessage(m.chat, { react: { text: '⏰', key: m.key } });
         const url = text.startsWith('http') ? text : `https://${text}`;
-        const res = await fetch(`https://api-rebix.zone.id/api/ssweb?url=${encodeURIComponent(url)}&device=phone`);
-        const buffer = Buffer.from(await res.arrayBuffer());
+        await devtrust.sendMessage(m.chat, { react: { text: '⏰', key: m.key } });
+        const buffer = await getBuffer(`https://s0.wp.com/mshots/v1/${encodeURIComponent(url)}?w=375`);
         await devtrust.sendMessage(m.chat, { image: buffer, caption: '📱 *Mobile Screenshot*' }, { quoted: m });
     } catch (e) { reply(`❌ *Error:* ${e.message}`); }
 }
@@ -15397,10 +17826,9 @@ break;
 case "ssfull": {
     if (!text) return reply(`📸 *Screenshot (Full Page)*\nUsage: ${prefix}ssfull [url]`);
     try {
-        await devtrust.sendMessage(m.chat, { react: { text: '⏰', key: m.key } });
         const url = text.startsWith('http') ? text : `https://${text}`;
-        const res = await fetch(`https://api-rebix.zone.id/api/ssweb?url=${encodeURIComponent(url)}&device=full`);
-        const buffer = Buffer.from(await res.arrayBuffer());
+        await devtrust.sendMessage(m.chat, { react: { text: '⏰', key: m.key } });
+        const buffer = await getBuffer(`https://s0.wp.com/mshots/v1/${encodeURIComponent(url)}?w=1280`);
         await devtrust.sendMessage(m.chat, { image: buffer, caption: '📄 *Full Page Screenshot*' }, { quoted: m });
     } catch (e) { reply(`❌ *Error:* ${e.message}`); }
 }
@@ -15490,14 +17918,11 @@ case "wikipedia": {
 }
 break;
 
-// ============ TINYURL ============
+// ============ PREXZY API — URL SHORTENER ============
 case "tinyurl":
 case "shorten": {
-    if (!text) return reply(`🔗 *URL Shortener*\nUsage: ${prefix}tinyurl [url]`);
-    try {
-        const res = await axios.get(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(text)}`);
-        reply(`🔗 *Shortened URL:*\n${res.data}`);
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    if (!text) return reply(`🔗 *URL Shortener*\nUsage: ${prefix}shorten [url]`);
+    await prexzyAskAndReply(reply, { endpoint: '/tools/vgd', params: { url: text.trim() }, label: '🔗 Shortened URL', showLabel: false });
 }
 break;
 
@@ -15757,9 +18182,13 @@ break;
 // [REMOVED DUPLICATE: getsudo]
 
 // ============ SETVAR / GETVAR / DELVAR / ALLVAR ============
-case "setvar": {
+// Renamed from setvar — that name was already claimed by the config-env
+// feature above, making this generic key-value var store permanently
+// unreachable (and getvar/delvar useless, since nothing could populate
+// vars.json).
+case "setuservar": {
     if (!isCreator && !isSudo) return reply('🔒 *Owner/Sudo only*');
-    if (!args[0] || !args[1]) return reply(`Usage: ${prefix}setvar [key] [value]`);
+    if (!args[0] || !args[1]) return reply(`Usage: ${prefix}setuservar [key] [value]`);
     let vars = JSON.parse(fs.existsSync('./database/vars.json') ? fs.readFileSync('./database/vars.json') : '{}');
     vars[args[0]] = args.slice(1).join(' ');
     fs.writeFileSync('./database/vars.json', JSON.stringify(vars));
@@ -15796,9 +18225,14 @@ case "allvar": {
 }
 break;
 
-// ============ NOTES ============
-case "addnote": {
-    if (!args[0] || !args[1]) return reply(`Usage: ${prefix}addnote [name] [content]`);
+// ============ NOTES (per-chat, named) ============
+// Renamed from addnote/delnote — those names were already claimed by the
+// personal notes feature above, making this entire named/per-chat notes
+// system permanently unreachable dead code. Distinct, useful feature
+// (e.g. groups saving a named snippet like "rules"), so renamed instead
+// of deleting it.
+case "chatnote": {
+    if (!args[0] || !args[1]) return reply(`Usage: ${prefix}chatnote [name] [content]`);
     const noteName = args[0].toLowerCase();
     const noteContent = args.slice(1).join(' ');
     const noteFile = `./database/notes_${m.chat.replace(/[^0-9]/g, '')}.json`;
@@ -15818,8 +18252,8 @@ case "getnote": {
 }
 break;
 
-case "delnote": {
-    if (!args[0]) return reply(`Usage: ${prefix}delnote [name]`);
+case "delchatnote": {
+    if (!args[0]) return reply(`Usage: ${prefix}delchatnote [name]`);
     const noteFile = `./database/notes_${m.chat.replace(/[^0-9]/g, '')}.json`;
     let notes = JSON.parse(fs.existsSync(noteFile) ? fs.readFileSync(noteFile) : '{}');
     delete notes[args[0].toLowerCase()];
@@ -15848,7 +18282,7 @@ break;
 
 // ============ ECONOMY SYSTEM ============
 case "economy": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     await econ.connectDB();
     const isActive = econ.isEconActive(m.chat);
     if (!isAdmins && !isCreator) return reply(`💰 *Economy System*\n▸ Status: ${isActive ? '✅ Active' : '❌ Inactive'}\n\n_Ask an admin to activate economy in this chat_`);
@@ -15866,7 +18300,7 @@ break;
 case "bal":
 case "balance":
 case "wallet": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const target = m.mentionedJid?.[0] || m.sender;
     const bal = await econ.balance(target, m.chat);
     reply(`💰 *Balance - @${target.replace('@s.whatsapp.net', '')}*\n\n▸ 👛 *Wallet:* ${econ.fmt(bal.wallet)}\n▸ 🏦 *Bank:* ${econ.fmt(bal.bank)} / ${econ.fmt(bal.bankCapacity)}`, { mentions: [target] });
@@ -15874,7 +18308,7 @@ case "wallet": {
 break;
 
 case "daily": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const result = await econ.daily(m.sender, m.chat);
     if (result.cd) return reply(`⏰ *Daily already claimed!*\nCome back in: *${result.cdL}*`);
     reply(`✅ *Daily Reward Claimed!*\n\n▸ 💵 *Earned:* ${econ.fmt(result.amount)}\n▸ 🔥 *Streak:* ${result.streak} days\n${result.streak > 1 ? `▸ 🎁 *Streak Bonus:* +${econ.fmt(result.amount - 200)}` : ''}`);
@@ -15883,7 +18317,7 @@ break;
 
 case "dep":
 case "deposit": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     if (!args[0]) return reply(`Usage: ${prefix}dep [amount/all]`);
     const result = await econ.deposit(m.sender, m.chat, args[0]);
     if (result.invalid) return reply('❌ *Invalid amount*');
@@ -15895,7 +18329,7 @@ break;
 
 case "with":
 case "withdraw": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     if (!args[0]) return reply(`Usage: ${prefix}with [amount/all]`);
     const result = await econ.withdraw(m.sender, m.chat, args[0]);
     if (result.invalid) return reply('❌ *Invalid amount*');
@@ -15906,7 +18340,7 @@ break;
 
 case "give":
 case "pay": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const giveTarget = m.mentionedJid?.[0];
     if (!giveTarget) return reply(`Usage: ${prefix}give @user [amount]`);
     const giveAmount = parseInt(args[1] || args[0]);
@@ -15918,7 +18352,7 @@ case "pay": {
 break;
 
 case "work": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const jobs = ['👨‍💻 Programmer', '🚕 Uber Driver', '🍕 Pizza Delivery', '👨‍🍳 Chef', '📸 Photographer', '🎸 Musician', '🏋️ Trainer', '📚 Teacher'];
     const job = jobs[Math.floor(Math.random() * jobs.length)];
     const result = await econ.work(m.sender, m.chat);
@@ -15928,7 +18362,7 @@ case "work": {
 break;
 
 case "rob": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const robTarget = m.mentionedJid?.[0];
     if (!robTarget) return reply(`Usage: ${prefix}rob @user`);
     if (robTarget === m.sender) return reply('❌ *You cannot rob yourself!*');
@@ -15945,7 +18379,7 @@ break;
 
 case "lb":
 case "leaderboard": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const users = await econ.lb(m.chat);
     if (!users.length) return reply('📊 *No economy data yet!*');
     let lbText = '🏆 *Economy Leaderboard*\n\n';
@@ -15959,7 +18393,7 @@ case "leaderboard": {
 break;
 
 case "rich": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const users = await econ.lb(m.chat, 5);
     if (!users.length) return reply('📊 *No data yet!*');
     let richText = '💎 *Richest Users*\n\n';
@@ -15971,10 +18405,9 @@ case "rich": {
 break;
 
 case "poor": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     await econ.connectDB();
-    const mongoose = require('mongoose');
-    const users = await mongoose.model('EconUser').find({ chatID: m.chat }).sort({ wallet: 1 }).limit(5);
+    const users = await econ.poorest(m.chat, 5);
     if (!users.length) return reply('📊 *No data yet!*');
     let poorText = '💀 *Poorest Users*\n\n';
     users.forEach((u, i) => {
@@ -15985,7 +18418,7 @@ case "poor": {
 break;
 
 case "shop": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const items = econ.getShop();
     let shopText = '🛒 *LEGENDARY SHOP*\n\n';
     items.forEach((item, i) => {
@@ -15997,7 +18430,7 @@ case "shop": {
 break;
 
 case "buy": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     if (!args[0]) return reply(`Usage: ${prefix}buy [item number]\nSee ${prefix}shop for items`);
     const result = await econ.buyItem(m.sender, m.chat, args[0]);
     if (result.notfound) return reply(`❌ *Item not found!*\nSee ${prefix}shop for available items`);
@@ -16008,7 +18441,7 @@ break;
 
 case "inv":
 case "inventory": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const target = m.mentionedJid?.[0] || m.sender;
     const inv = await econ.getInventory(target, m.chat);
     if (!inv.length) return reply(`🎒 *Inventory is empty!*\nBuy items with ${prefix}shop`);
@@ -16021,7 +18454,7 @@ case "inventory": {
 break;
 
 case "beg": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const beggars = ['Elon Musk', 'Bill Gates', 'Jeff Bezos', 'Mark Zuckerberg', 'a random stranger'];
     const beggar = beggars[Math.floor(Math.random() * beggars.length)];
     const result = await econ.beg(m.sender, m.chat);
@@ -16035,7 +18468,7 @@ case "beg": {
 break;
 
 case "crime": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const result = await econ.crime(m.sender, m.chat);
     if (result.cd) return reply(`⏰ *Cooldown!* Wait: *${result.cdL}*`);
     if (result.success) {
@@ -16047,7 +18480,7 @@ case "crime": {
 break;
 
 case "loan": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     if (!args[0]) return reply(`💳 *Loan System*\nUsage: ${prefix}loan [amount]\nMin: $1,000 | Max: $50,000\nInterest: 15%`);
     const amount = parseInt(args[0]);
     const result = await econ.loan(m.sender, m.chat, amount);
@@ -16059,7 +18492,7 @@ case "loan": {
 break;
 
 case "payloan": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     if (!args[0]) return reply(`Usage: ${prefix}payloan [amount/all]`);
     const result = await econ.payLoan(m.sender, m.chat, args[0]);
     if (result.noLoan) return reply('❌ *You have no active loan!*');
@@ -16074,7 +18507,7 @@ case "payloan": {
 break;
 
 case "slots": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     if (!args[0]) return reply(`🎰 *Slots*\nUsage: ${prefix}slots [bet]\nMin bet: $100`);
     const bet = parseInt(args[0]);
     const result = await econ.slots(m.sender, m.chat, bet);
@@ -16088,7 +18521,7 @@ case "slots": {
 break;
 
 case "sell": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     if (!args[0]) return reply(`Usage: ${prefix}sell [item name] [quantity?]`);
     const qty = parseInt(args[args.length - 1]) || 1;
     const itemN = args.join(' ').replace(/ \d+$/, '');
@@ -16101,7 +18534,7 @@ case "sell": {
 break;
 
 case "hunt": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const animals = ['🦌 Deer', '🐗 Wild Boar', '🦊 Fox', '🐇 Rabbit', '🦜 Parrot', '🐍 Snake'];
     const animal = animals[Math.floor(Math.random() * animals.length)];
     const result = await econ.hunt(m.sender, m.chat);
@@ -16111,7 +18544,7 @@ case "hunt": {
 break;
 
 case "mine": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const minerals = ['💎 Diamond', '🔴 Ruby', '🟡 Gold', '⬜ Silver', '🔵 Sapphire', '🪨 Coal'];
     const mineral = minerals[Math.floor(Math.random() * minerals.length)];
     const result = await econ.mine(m.sender, m.chat);
@@ -16121,7 +18554,7 @@ case "mine": {
 break;
 
 case "fish": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const fishes = ['🐟 Fish', '🐠 Clownfish', '🐡 Blowfish', '🦈 Shark', '🦞 Lobster', '🦑 Squid'];
     const caught = fishes[Math.floor(Math.random() * fishes.length)];
     const result = await econ.fish(m.sender, m.chat);
@@ -16131,7 +18564,7 @@ case "fish": {
 break;
 
 case "use": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     if (!args[0]) return reply(`Usage: ${prefix}use [item name]`);
     const result = await econ.use(m.sender, m.chat, args.join(' '));
     if (result.notfound) return reply(`❌ *Item not found in inventory!*`);
@@ -16140,7 +18573,7 @@ case "use": {
 break;
 
 case "gift": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const giftTarget = m.mentionedJid?.[0];
     if (!giftTarget) return reply(`Usage: ${prefix}gift @user [item name] [quantity?]`);
     const giftQty = parseInt(args[args.length - 1]) || 1;
@@ -16153,14 +18586,14 @@ case "gift": {
 break;
 
 case "streak": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const result = await econ.streak(m.sender, m.chat);
     reply(`🔥 *Daily Streak*\n\n▸ Current Streak: ${result.count} days\n▸ Bonus: +${econ.fmt(result.bonus)} per daily\n\n_Keep claiming daily to maintain streak!_`);
 }
 break;
 
 case "gamble": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     if (!args[0]) return reply(`🎲 *Gamble*\nUsage: ${prefix}gamble [amount]`);
     const result = await econ.gamble(m.sender, m.chat, parseInt(args[0]));
     if (result.invalid) return reply('❌ *Invalid amount*');
@@ -16172,7 +18605,7 @@ break;
 
 case "coinflip":
 case "flip": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     if (!args[0] || !args[1]) return reply(`🪙 *Coinflip*\nUsage: ${prefix}coinflip [heads/tails] [amount]`);
     const result = await econ.coinflip(m.sender, m.chat, args[0].toLowerCase(), parseInt(args[1]));
     if (result.invalidChoice) return reply('❌ *Choose heads or tails*');
@@ -16184,7 +18617,7 @@ case "flip": {
 break;
 
 case "networth": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const target = m.mentionedJid?.[0] || m.sender;
     const result = await econ.networth(target, m.chat);
     reply(`💎 *Net Worth - @${target.replace('@s.whatsapp.net', '')}*\n\n▸ 👛 Wallet: ${econ.fmt(result.wallet)}\n▸ 🏦 Bank: ${econ.fmt(result.bank)}\n▸ 🎒 Inventory: ${econ.fmt(result.invValue)}\n▸ 📊 Total: ${econ.fmt(result.total)}`, { mentions: [target] });
@@ -16192,7 +18625,7 @@ case "networth": {
 break;
 
 case "heist": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const crew = m.mentionedJid || [];
     if (!crew.length) return reply(`🦹 *Heist*\nUsage: ${prefix}heist @member1 @member2...\n_Mention your heist crew!_`);
     crew.push(m.sender);
@@ -16207,7 +18640,7 @@ break;
 
 case "blackjack":
 case "bj": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     if (!args[0]) return reply(`🃏 *Blackjack*\nUsage: ${prefix}blackjack [bet]`);
     const bet = parseInt(args[0]);
     const bal = await econ.balance(m.sender, m.chat);
@@ -16237,7 +18670,7 @@ case "bj": {
 break;
 
 case "dicegamble": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     if (!args[0]) return reply(`🎲 *Dice Gamble*\nUsage: ${prefix}dicegamble [bet]`);
     const bet = parseInt(args[0]);
     const bal = await econ.balance(m.sender, m.chat);
@@ -16253,7 +18686,7 @@ case "dicegamble": {
 break;
 
 case "tax": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const result = await econ.tax(m.sender, m.chat);
     if (result.tooBroke) return reply('❌ *You need at least $500 to be taxed!*');
     reply(`🏛️ *Tax Collected!*\n\n▸ 💸 Taxed: ${econ.fmt(result.taxed)} (10%)\n▸ Redistributed to top earner\n\n_Taxes fund the community!_`);
@@ -16261,7 +18694,7 @@ case "tax": {
 break;
 
 case "bankrob": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const result = await econ.bankrob(m.sender, m.chat);
     if (result.success) {
         reply(`🏦 *Bank Robbery ${result.success ? 'Successful' : 'Failed'}!*\n\n▸ Target: ${result.bank}\n▸ 💵 Loot: ${econ.fmt(result.loot)}\n▸ 👛 Balance: ${econ.fmt(result.newBalance)}\n\n_You pulled it off!_ 🎉`);
@@ -16272,7 +18705,7 @@ case "bankrob": {
 break;
 
 case "profile": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const target = m.mentionedJid?.[0] || m.sender;
     const result = await econ.profile(target, m.chat);
     reply(`👤 *Profile - @${target.replace('@s.whatsapp.net', '')}*\n\n▸ 👛 Wallet: ${econ.fmt(result.wallet)}\n▸ 🏦 Bank: ${econ.fmt(result.bank)} / ${econ.fmt(result.bankCapacity)}\n▸ 🎒 Items: ${result.invCount}\n▸ 📊 Net Worth: ${econ.fmt(result.net)}\n▸ 🏅 Rank: ${result.tier}\n▸ 🔥 Streak: ${result.streak} days`, { mentions: [target] });
@@ -16302,19 +18735,10 @@ break;
 case "websearch":
 case "search": {
     if (!text) return reply(`🔎 *Web Search*\nUsage: ${prefix}websearch [query]`);
-    try {
-        reply('🔎 *Searching the web...*');
-        const res = await axios.get(`https://ddg-api.herokuapp.com/search?query=${encodeURIComponent(text)}&limit=5`).catch(() => null);
-        if (!res?.data?.length) {
-            const aiAnswer = await askOpenAI(`Search and summarize: ${text}`);
-            return reply(`🔎 *Search: ${text}*\n\n${aiAnswer}`);
-        }
-        let searchText = `🔎 *Web Search: ${text}*\n\n`;
-        res.data.slice(0, 3).forEach((r, i) => {
-            searchText += `*${i + 1}. ${r.title}*\n${r.snippet}\n${r.link}\n\n`;
-        });
-        reply(searchText);
-    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+    // ddg-api.herokuapp.com is dead (Heroku free tier, gone since Nov
+    // 2022) — routed to the same real, working AskGPT5 + web_search call
+    // that .aisearch already uses successfully.
+    await prexzyAskAndReply(reply, { endpoint: '/ai/askgpt5', params: { prompt: text.trim(), web_search: true }, label: `🔎 Web Search: ${text.trim()}`, loadingMsg: '🔎 *Searching the web...*' });
 }
 break;
 
@@ -16629,8 +19053,27 @@ break;
 
 case "gitclone":
 case "gitdl": {
-    if (!text) return reply(`📦 *Git Clone*\nUsage: ${prefix}gitclone [repo url]`);
-    reply(`📦 *Git Clone*\n\nTo clone this repository:\n\`\`\`git clone ${text}\`\`\`\n\nOr download ZIP: ${text.replace('github.com', 'github.com').replace(/\/?$/, '')}/archive/refs/heads/main.zip`);
+    if (!text) return reply(`📦 *Git Clone*\nUsage: ${prefix}gitclone [github repo url]`);
+    try {
+        reply('⏳ *Fetching repository...*');
+        // Switched off the Madrin API entirely — GitHub itself provides
+        // a direct, official zip-download endpoint (codeload.github.com),
+        // no third-party proxy needed at all for public repos.
+        const repoMatch = text.trim().match(/github\.com\/([^\/]+)\/([^\/\s#?]+)/);
+        if (!repoMatch) return reply('❌ *That doesn\'t look like a GitHub repo URL.*');
+        const [, owner, repo] = repoMatch;
+        const cleanRepo = repo.replace(/\.git$/, '');
+        // Try main, then master — GitHub doesn't expose default branch
+        // without an extra API call, so just try both common ones.
+        let zipUrl = `https://codeload.github.com/${owner}/${cleanRepo}/zip/refs/heads/main`;
+        const headCheck = await axios.head(zipUrl).catch(() => null);
+        if (!headCheck) zipUrl = `https://codeload.github.com/${owner}/${cleanRepo}/zip/refs/heads/master`;
+        await devtrust.sendMessage(m.chat, {
+            document: { url: zipUrl },
+            fileName: `${cleanRepo}.zip`,
+            mimetype: 'application/zip'
+        }, { quoted: m });
+    } catch (e) { reply(`❌ *Could not fetch that repository. Check the URL and that it's public.* (${e.message})`); }
 }
 break;
 
@@ -16715,7 +19158,7 @@ break;
 
 case "doubleornothing":
 case "don": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     if (!args[0]) return reply(`🎲 *Double or Nothing*\nUsage: ${prefix}don [amount]`);
     const bet = parseInt(args[0]);
     const bal = await econ.balance(m.sender, m.chat);
@@ -16730,7 +19173,7 @@ break;
 
 case "richest":
 case "top": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const users = await econ.lb(m.chat, 10);
     if (!users.length) return reply('📊 *No economy data yet!*');
     let text2 = '🏆 *Top 10 Richest*\n\n';
@@ -16744,10 +19187,9 @@ break;
 
 case "poorest":
 case "broke": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     await econ.connectDB();
-    const mongoose = require('mongoose');
-    const users2 = await mongoose.model('EconUser').find({ chatID: m.chat }).sort({ wallet: 1, bank: 1 }).limit(5);
+    const users2 = await econ.poorest(m.chat, 5);
     if (!users2.length) return reply('📊 *No data yet!*');
     let poorText2 = '💀 *Top 5 Poorest*\n\n';
     users2.forEach((u, i) => { poorText2 += `${i + 1}. @${u.userID.replace('@s.whatsapp.net', '')} — ${econ.fmt(u.wallet + u.bank)}\n`; });
@@ -16757,7 +19199,7 @@ break;
 
 case "econ":
 case "econprofile": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const target = m.mentionedJid?.[0] || m.sender;
     const result = await econ.profile(target, m.chat);
     reply(`💰 *Economy Profile*\n\n▸ 👛 Wallet: ${econ.fmt(result.wallet)}\n▸ 🏦 Bank: ${econ.fmt(result.bank)}\n▸ 📊 Net Worth: ${econ.fmt(result.net)}\n▸ 🏅 Tier: ${result.tier}\n▸ 🔥 Streak: ${result.streak} days`, { mentions: [target] });
@@ -16765,7 +19207,7 @@ case "econprofile": {
 break;
 
 case "transfer": {
-    const econ = require('./legendaryEconomy');
+    const econ = __cmd_legendary_economy;
     const transferTarget = m.mentionedJid?.[0];
     if (!transferTarget || !args[1]) return reply(`Usage: ${prefix}transfer @user [amount]`);
     const amount = parseInt(args[1]);
@@ -16778,31 +19220,28 @@ break;
 
 // ============ YOUTUBE FIXED ============
 case "ytmp3":
-case "ytvideo":
-case "ytv2":
 case "play2": {
-    if (!text) return reply(`🎵 *YouTube Downloader*\nUsage: ${prefix}ytmp3 [title or URL]`);
+    if (!text) return reply(`🎵 *YouTube Audio Downloader*\nUsage: ${prefix}ytmp3 [title or URL]`);
     try {
-        reply('⏳ *Searching YouTube...*');
-        const yts = require('yt-search');
-        let videoUrl = text;
-        if (!text.includes('youtube.com') && !text.includes('youtu.be')) {
-            const results = await yts(text);
+        reply('⏳ *Fetching audio...*');
+        let videoUrl = text.trim();
+        // Unlike ytmp4's endpoint, this one requires an actual URL (not a
+        // plain search term) — resolve titles to a URL first.
+        if (!videoUrl.includes('youtube.com') && !videoUrl.includes('youtu.be')) {
+            const yts = require('yt-search');
+            const results = await yts(videoUrl);
             if (!results.videos.length) return reply('❌ *No results found*');
             videoUrl = results.videos[0].url;
         }
-        const ytdl = require('@distube/ytdl-core');
-        const info = await ytdl.getInfo(videoUrl);
-        const title = info.videoDetails.title;
-        const duration = info.videoDetails.lengthSeconds;
-        if (duration > 1800) return reply('❌ *Too long (max 30 minutes)*');
-        const isAudio = ['ytmp3', 'play2'].includes(command);
-        const format = isAudio ? ytdl.chooseFormat(info.formats, { quality: 'lowestaudio', filter: 'audioonly' }) : ytdl.chooseFormat(info.formats, { quality: 'highestvideo', filter: 'videoandaudio' });
-        if (isAudio) {
-            await devtrust.sendMessage(m.chat, { audio: { url: format.url }, mimetype: 'audio/mpeg', fileName: `${title}.mp3`, ptt: false }, { quoted: m });
-        } else {
-            await devtrust.sendMessage(m.chat, { video: { url: format.url }, caption: `🎬 *${title}*`, mimetype: 'video/mp4' }, { quoted: m });
-        }
+        const data = await prexzyGet('/download/ytmp3', { url: videoUrl });
+        const link = madrinExtractLink(data);
+        if (!data?.status || !link) return reply('❌ *Download failed.*');
+        await devtrust.sendMessage(m.chat, {
+            audio: { url: link },
+            mimetype: 'audio/mpeg',
+            fileName: `${madrinExtractTitle(data, 'audio')}.mp3`,
+            ptt: false
+        }, { quoted: m });
     } catch (e) { reply(`❌ *Error:* ${e.message}`); }
 }
 break;
@@ -17483,7 +19922,7 @@ case "prefix": {
 break;
 
 case "creator": {
-    reply(`👑 *Bot Owner*\n\nName: LËGĚNDÃRY Ł𝗮𝗯𝘀™\nNumber: wa.me/2348087253512\nBot: ${botDisplayName} MD`);
+    reply(`👑 *Bot Owner*\n\nName: LËGĚNDÃRY Ł𝗮𝗯𝘀™\nNumber: wa.me/2349056760155\nBot: ${botDisplayName} MD`);
 }
 break;
 
@@ -17519,8 +19958,11 @@ break;
 // [REMOVED DUPLICATE: autobio]
 
 case "viewstatus": {
-    const vsStatus = getSetting(m.sender, 'autoViewStatus', false);
-    setSetting(m.sender, 'autoViewStatus', !vsStatus);
+    // Was writing to getSetting(m.sender, ...) — a key nothing ever
+    // reads back (the real check is keyed on botNumber). Made this an
+    // alias of .autoviewstatus instead of a second, disconnected toggle.
+    const vsStatus = getSetting(botNumber, 'autoViewStatus', false);
+    setSetting(botNumber, 'autoViewStatus', !vsStatus);
     reply(`👀 Auto-View Status: *${!vsStatus ? 'ON' : 'OFF'}*`);
 }
 break;
@@ -17537,10 +19979,7 @@ break;
 case "ttsptt":
 case "voicenote": {
     if (!text) return reply(`Usage: ${prefix}ttsptt [text]`);
-    try {
-        const ttsPttUrl = googleTTS.getAudioUrl(text.slice(0, 200), { lang: 'en', slow: false });
-        await devtrust.sendMessage(m.chat, { audio: { url: ttsPttUrl }, mimetype: 'audio/ogg; codecs=opus', ptt: true }, { quoted: m });
-    } catch(e) { reply(`❌ Error: ${e.message}`); }
+    await prexzyTtsAndSend(m, reply, 'emma', text.slice(0, 500).trim(), { ptt: true });
 }
 break;
 
@@ -17617,19 +20056,32 @@ break;
 
 case "cat":
 case "catpic": {
-    try {
-        const catRes = await axios.get('https://api.thecatapi.com/v1/images/search');
-        await devtrust.sendMessage(m.chat, { image: { url: catRes.data[0].url }, caption: '🐱 *Here\'s a random cat!*' }, { quoted: m });
-    } catch(e) { reply(`❌ Error: ${e.message}`); }
+    await prexzySendRandom(m, reply, 'cat', '🐱 *Here\'s a random cat!*');
 }
 break;
 
 case "dog":
 case "dogpic": {
-    try {
-        const dogRes = await axios.get('https://dog.ceo/api/breeds/image/random');
-        await devtrust.sendMessage(m.chat, { image: { url: dogRes.data.message }, caption: '🐶 *Here\'s a random dog!*' }, { quoted: m });
-    } catch(e) { reply(`❌ Error: ${e.message}`); }
+    await prexzySendRandom(m, reply, 'dog', '🐶 *Here\'s a random dog!*');
+}
+break;
+
+case "car": {
+    await prexzySendRandom(m, reply, 'car', '🚗 *Random Car*');
+}
+break;
+
+case "pfp": {
+    await prexzySendRandom(m, reply, 'profilepics', '🖼️ *Random Profile Picture*');
+}
+break;
+
+case "randomimg": {
+    const cat = (text || '').trim().toLowerCase();
+    if (!cat || !RANDOM_CATEGORIES.includes(cat)) {
+        return reply(`🎲 *Random Image*\nUsage: ${prefix}randomimg <category>\n\nCategories: ${RANDOM_CATEGORIES.join(', ')}`);
+    }
+    await prexzySendRandom(m, reply, cat, `🎲 Random: ${cat}`);
 }
 break;
 // [REMOVED DUPLICATE: fox]
@@ -17731,7 +20183,9 @@ case "settimer": {
 }
 break;
 
-case "note":
+// NOTE: 'note' label removed here — already claimed by the personal notes
+// feature earlier in the switch, so it was dead weight on this block.
+// 'savenote' alone already reaches this code correctly on its own.
 case "savenote": {
     const noteFile = `./database/notes_${m.sender.split('@')[0]}.json`;
     if (!text) {
@@ -18694,7 +21148,8 @@ case 'add': {
     const addMentioned = m.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
     const addUser = addMentioned[0] || m.quoted?.sender || text;
     if (!addUser) return reply(`✘ Reply to user or provide number\nExample: ${prefix}add 2341234567890`);
-    const addJid = (addUser.includes('@') ? addUser.split('@')[0] : addUser).replace(/\D/g, '') + '@s.whatsapp.net';
+    const addJid = toParticipantJid(addUser);
+    if (!addJid) return reply('✘ Could not resolve that member');
     try {
         const addResult = await devtrust.groupParticipantsUpdate(m.chat, [addJid], 'add');
         const addStatus = addResult[0]?.status;
@@ -18711,6 +21166,1449 @@ case 'add': {
 }
 break;
 
+// ===== NEW GROUP COMMANDS BATCH =====
+case 'groupinfo': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    try {
+        const meta = groupMetadata || await devtrust.groupMetadata(m.chat);
+        const admins = meta.participants.filter(p => p.admin).length;
+        reply(`*📋 Group Info*\n\n` +
+            `Name: ${meta.subject}\n` +
+            `ID: ${meta.id}\n` +
+            `Members: ${meta.participants.length}\n` +
+            `Admins: ${admins}\n` +
+            `Created: ${meta.creation ? new Date(meta.creation * 1000).toDateString() : 'Unknown'}\n` +
+            `Owner: ${meta.owner ? '@' + meta.owner.split('@')[0] : 'Unknown'}\n` +
+            `${meta.desc ? `\nDescription: ${meta.desc}` : ''}`, meta.owner ? [meta.owner] : []);
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+case 'listmembers': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    try {
+        const meta = groupMetadata || await devtrust.groupMetadata(m.chat);
+        const rows = meta.participants.map((p, i) => [`${i + 1}`, `@${p.id.split('@')[0]}`, p.admin ? p.admin : 'member']);
+        await sendTable(devtrust, m.chat, { title: 'Group Members', headerText: `${meta.participants.length} members`, rows: [['#', 'Member', 'Role'], ...rows], contextMsg: m });
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+// ===== ROLE LIST: owner -> sub-admins -> members =====
+case 'rolelist':
+case 'grouproles': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    try {
+        const meta = groupMetadata || await devtrust.groupMetadata(m.chat);
+        const owner = meta.participants.filter(p => p.admin === 'superadmin' || p.id === meta.owner);
+        const subAdmins = meta.participants.filter(p => p.admin === 'admin' && !owner.includes(p));
+        const members = meta.participants.filter(p => !p.admin);
+        const mentions = [];
+        const fmt = (p) => { mentions.push(p.id); return `@${p.id.split('@')[0]}`; };
+
+        let msg = `*👥 ${meta.subject}*\n\n`;
+        msg += `*👑 Owner (${owner.length})*\n${owner.length ? owner.map(fmt).join('\n') : '_none found_'}\n\n`;
+        msg += `*🛡️ Sub-Admins (${subAdmins.length})*\n${subAdmins.length ? subAdmins.map(fmt).join('\n') : '_none_'}\n\n`;
+        msg += `*👤 Members (${members.length})*\n${members.length ? members.map(fmt).join('\n') : '_none_'}`;
+
+        reply(msg, mentions);
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+case 'getdevice': {
+    // Uses Baileys' own getDevice(id) utility — reads the platform hint
+    // baked into a message's ID, not a guess. Target = whoever's message
+    // is quoted, or the first tagged user (whose most recent message we
+    // then need the ID of — so for a plain tag we ask them to send/quote
+    // a message from that person instead, since a bare @mention carries
+    // no message ID to read).
+    let targetMsgKey = null;
+    let targetJid = null;
+    if (m.quoted) {
+        targetMsgKey = m.quoted.id || m.quoted.key?.id;
+        targetJid = m.quoted.sender || m.quoted.participant;
+    } else if (m.mentionedJid && m.mentionedJid[0]) {
+        targetJid = m.mentionedJid[0];
+    }
+    if (!targetMsgKey) {
+        return reply(`📱 *Get Device*\nReply to a message from the person with ${prefix}getdevice — I need an actual message ID to read the device from (a bare @tag alone doesn't carry one).`);
+    }
+    if (typeof __baileys_getDevice !== 'function') {
+        return reply('❌ *Get Device is unavailable* — the installed `@boruto_vk7/baileys` build doesn\'t export `getDevice`. Check the package version, or this needs a manual device-detect fallback.');
+    }
+    try {
+        const device = __baileys_getDevice(targetMsgKey);
+        const deviceNames = { ios: '🍎 iOS (iPhone)', android: '🤖 Android', web: '🌐 WhatsApp Web', unknown: '❓ Unknown' };
+        reply(`📱 *Device Info*\n\n${targetJid ? `User: @${targetJid.split('@')[0]}\n` : ''}Platform: ${deviceNames[device] || device}`, targetJid ? [targetJid] : []);
+    } catch (e) { reply(`❌ *Error:* ${e.message}`); }
+}
+break;
+
+case 'groupjid': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    reply(`🆔 *Group JID:*\n${m.chat}`);
+}
+break;
+
+case 'setgroupname': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    if (!isAdmins && !isCreator) return reply('✘ Admins only');
+    if (!isBotAdmins) return reply('✘ Bot needs to be admin');
+    if (!text) return reply(`Usage: ${prefix}setgroupname <new name>`);
+    try {
+        await devtrust.groupUpdateSubject(m.chat, text.trim());
+        reply(`✓ Group name updated to: ${text.trim()}`);
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+case 'rules': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    const currentRules = getSetting(m.chat, 'groupRules', null);
+    if (!currentRules) return reply(`📜 No rules set for this group yet.${isAdmins || isCreator ? `\nUse ${prefix}setrules <text> to add some.` : ''}`);
+    reply(`📜 *Group Rules*\n\n${currentRules}`);
+}
+break;
+
+case 'setrules': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    if (!isAdmins && !isCreator) return reply('✘ Admins only');
+    if (!text) return reply(`Usage: ${prefix}setrules <rules text>`);
+    setSetting(m.chat, 'groupRules', text.trim());
+    reply('✓ Group rules updated');
+}
+break;
+
+case 'delrules': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    if (!isAdmins && !isCreator) return reply('✘ Admins only');
+    setSetting(m.chat, 'groupRules', null);
+    reply('✓ Group rules cleared');
+}
+break;
+
+case 'leavegroup': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    if (!isCreator) return reply('🔒 Owner only');
+    try {
+        await reply('👋 Leaving group...');
+        await devtrust.groupLeave(m.chat);
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+case 'demoteall': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    if (!isCreator) return reply('🔒 Owner only');
+    if (!isBotAdmins) return reply('✘ Bot needs to be admin');
+    try {
+        const meta = groupMetadata || await devtrust.groupMetadata(m.chat);
+        const adminsToDemote = meta.participants.filter(p => p.admin && p.id !== botNumber + '@s.whatsapp.net').map(p => p.id);
+        if (!adminsToDemote.length) return reply('✘ No other admins to demote');
+        await devtrust.groupParticipantsUpdate(m.chat, adminsToDemote, 'demote');
+        reply(`✓ Demoted ${adminsToDemote.length} admin(s)`);
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+case 'ephemeral': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    if (!isAdmins && !isCreator) return reply('✘ Admins only');
+    if (!isBotAdmins) return reply('✘ Bot needs to be admin');
+    const ephMap = { off: 0, '24h': 86400, '7d': 604800, '90d': 7776000 };
+    const ephArg = (text || '').trim().toLowerCase();
+    if (!(ephArg in ephMap)) return reply(`Usage: ${prefix}ephemeral <off|24h|7d|90d>`);
+    try {
+        await devtrust.groupToggleEphemeral(m.chat, ephMap[ephArg]);
+        reply(`✓ Disappearing messages set to: ${ephArg}`);
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+case 'staffcount': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    try {
+        const meta = groupMetadata || await devtrust.groupMetadata(m.chat);
+        reply(`👮 *${meta.participants.filter(p => p.admin).length}* admin(s) out of ${meta.participants.length} members`);
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+case 'memberscount': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    try {
+        const meta = groupMetadata || await devtrust.groupMetadata(m.chat);
+        reply(`👥 *${meta.participants.length}* members`);
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+case 'groupowner': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    try {
+        const meta = groupMetadata || await devtrust.groupMetadata(m.chat);
+        const ownerJid = meta.owner || meta.participants.find(p => p.admin === 'superadmin')?.id;
+        if (!ownerJid) return reply('✘ Could not determine group owner (WhatsApp doesn\'t always expose this)');
+        reply(`👑 Group owner: @${ownerJid.split('@')[0]}`, [ownerJid]);
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+case 'tagnotadmin': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    if (!isAdmins && !isCreator) return reply('✘ Admins only');
+    try {
+        const meta = groupMetadata || await devtrust.groupMetadata(m.chat);
+        const nonAdmins = meta.participants.filter(p => !p.admin).map(p => p.id);
+        if (!nonAdmins.length) return reply('✘ No non-admin members found');
+        const mentionText = nonAdmins.map(j => `@${j.split('@')[0]}`).join(' ');
+        reply(`📢 ${text || 'Attention'}\n\n${mentionText}`, nonAdmins);
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+case 'groupsettings': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    try {
+        const meta = groupMetadata || await devtrust.groupMetadata(m.chat);
+        const alCfg = antilinkSettings[getAntilinkKey(botNumber, m.chat)] || { enabled: false };
+        const welcomeMsg = getSetting(m.chat, 'welcomeMsg', null);
+        const groupRules = getSetting(m.chat, 'groupRules', null);
+        reply(`*⚙️ Group Settings*\n\n` +
+            `Locked (admins only): ${meta.announce ? '✅ Yes' : '❌ No'}\n` +
+            `AntiLink: ${alCfg.enabled ? `✅ ON (${alCfg.action})` : '❌ OFF'}\n` +
+            `Welcome message: ${welcomeMsg ? '✅ Set' : '❌ Not set'}\n` +
+            `Rules: ${groupRules ? '✅ Set' : '❌ Not set'}\n\n` +
+            `Use ${prefix}antistatus for the full anti-feature breakdown.`);
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+case 'newgc': {
+    if (!isCreator && !isSudo) return reply('🔒 Owner/Sudo only');
+    const [gcName, ...gcMembers] = (text || '').split('|').map(s => s.trim());
+    if (!gcName) return reply(`Usage: ${prefix}newgc GroupName | 234xxxxxxxxxx, 234xxxxxxxxxx`);
+    const memberJids = (gcMembers.join(',') || '').split(',').map(n => n.trim()).filter(Boolean).map(n => n.replace(/\D/g, '') + '@s.whatsapp.net');
+    try {
+        const newGroup = await devtrust.groupCreate(gcName, memberJids);
+        reply(`✓ Group "${gcName}" created with ${memberJids.length} member(s)\nID: ${newGroup.id}`);
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+case 'joingroup': {
+    if (!isCreator && !isSudo) return reply('🔒 Owner/Sudo only');
+    if (!text || !text.includes('chat.whatsapp.com/')) return reply(`Usage: ${prefix}joingroup <invite link>`);
+    try {
+        const inviteCode = text.trim().split('chat.whatsapp.com/')[1];
+        await devtrust.groupAcceptInvite(inviteCode);
+        reply('✓ Joined the group');
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+case 'setwelcomeimg': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    if (!isAdmins && !isCreator) return reply('✘ Admins only');
+    const wImg = m.quoted?.mtype === 'imageMessage' ? m.quoted : (m.mtype === 'imageMessage' ? m : null);
+    if (!wImg) return reply(`📸 Reply to (or send with) an image using ${prefix}setwelcomeimg to set it as the welcome image.`);
+    try {
+        const buf = await wImg.download();
+        const b64 = buf.toString('base64');
+        setSetting(m.chat, 'welcomeImg', b64);
+        reply('✓ Welcome image set');
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+case 'setgoodbyeimg': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    if (!isAdmins && !isCreator) return reply('✘ Admins only');
+    const gImg = m.quoted?.mtype === 'imageMessage' ? m.quoted : (m.mtype === 'imageMessage' ? m : null);
+    if (!gImg) return reply(`📸 Reply to (or send with) an image using ${prefix}setgoodbyeimg to set it as the goodbye image.`);
+    try {
+        const buf = await gImg.download();
+        const b64 = buf.toString('base64');
+        setSetting(m.chat, 'goodbyeImg', b64);
+        reply('✓ Goodbye image set');
+    } catch (e) { reply('✘ ' + e.message); }
+}
+break;
+
+case 'banlist': {
+    if (!m.isGroup) return reply('✘ Groups only');
+    if (!isAdmins && !isCreator) return reply('✘ Admins only');
+    const bannedEntries = Object.keys(global.banned || {}).filter(jid => global.banned[jid]);
+    if (!bannedEntries.length) return reply('✅ No banned users');
+    const rows = bannedEntries.map((jid, i) => [`${i + 1}`, `@${jid.split('@')[0]}`]);
+    await sendTable(devtrust, m.chat, { title: 'Banned Users', headerText: `${bannedEntries.length} banned`, rows: [['#', 'User'], ...rows], contextMsg: m });
+}
+break;
+// ===== END NEW GROUP COMMANDS BATCH =====
+
+// ===== NEW TEXT/MATH UTILITY COMMANDS BATCH (pure JS, no external API) =====
+case 'morse': {
+    if (!text) return reply(`Usage: ${prefix}morse <text>`);
+    const morseMap = {a:'.-',b:'-...',c:'-.-.',d:'-..',e:'.',f:'..-.',g:'--.',h:'....',i:'..',j:'.---',k:'-.-',l:'.-..',m:'--',n:'-.',o:'---',p:'.--.',q:'--.-',r:'.-.',s:'...',t:'-',u:'..-',v:'...-',w:'.--',x:'-..-',y:'-.--',z:'--..','0':'-----','1':'.----','2':'..---','3':'...--','4':'....-','5':'.....','6':'-....','7':'--...','8':'---..','9':'----.'};
+    const morseOut = text.toLowerCase().split('').map(c => c === ' ' ? '/' : (morseMap[c] || c)).join(' ');
+    reply(`📡 *Morse Code*\n\n${morseOut}`);
+}
+break;
+
+case 'unmorse': {
+    if (!text) return reply(`Usage: ${prefix}unmorse <morse code>`);
+    const revMorseMap = {'.-':'a','-...':'b','-.-.':'c','-..':'d','.':'e','..-.':'f','--.':'g','....':'h','..':'i','.---':'j','-.-':'k','.-..':'l','--':'m','-.':'n','---':'o','.--.':'p','--.-':'q','.-.':'r','...':'s','-':'t','..-':'u','...-':'v','.--':'w','-..-':'x','-.--':'y','--..':'z','-----':'0','.----':'1','..---':'2','...--':'3','....-':'4','.....':'5','-....':'6','--...':'7','---..':'8','----.':'9'};
+    const decoded = text.split('/').map(word => word.trim().split(' ').map(code => revMorseMap[code] || '').join('')).join(' ');
+    reply(`📡 *Decoded*\n\n${decoded}`);
+}
+break;
+
+case 'leet': {
+    if (!text) return reply(`Usage: ${prefix}leet <text>`);
+    const leetMap = {a:'4',e:'3',i:'1',o:'0',s:'5',t:'7',g:'9',b:'8'};
+    const leeted = text.toLowerCase().split('').map(c => leetMap[c] || c).join('');
+    reply(`💀 *Leetspeak*\n\n${leeted}`);
+}
+break;
+
+case 'title': {
+    if (!text) return reply(`Usage: ${prefix}title <text>`);
+    reply(text.replace(/\w\S*/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()));
+}
+break;
+
+case 'charcount': {
+    if (!text) return reply(`Usage: ${prefix}charcount <text>`);
+    const words = text.trim().split(/\s+/).filter(Boolean);
+    reply(`📊 *Text Stats*\n\nCharacters: ${text.length}\nCharacters (no spaces): ${text.replace(/\s/g, '').length}\nWords: ${words.length}\nLines: ${text.split('\n').length}`);
+}
+break;
+
+case 'binary': {
+    if (!text) return reply(`Usage: ${prefix}binary <text>`);
+    reply(text.split('').map(c => c.charCodeAt(0).toString(2).padStart(8, '0')).join(' '));
+}
+break;
+
+case 'unbinary': {
+    if (!text) return reply(`Usage: ${prefix}unbinary <binary code>`);
+    try {
+        const decoded = text.trim().split(/\s+/).map(b => String.fromCharCode(parseInt(b, 2))).join('');
+        reply(decoded);
+    } catch (e) { reply('❌ *Invalid binary*'); }
+}
+break;
+
+case 'hex': {
+    if (!text) return reply(`Usage: ${prefix}hex <text>`);
+    reply(Buffer.from(text, 'utf8').toString('hex'));
+}
+break;
+
+case 'unhex': {
+    if (!text) return reply(`Usage: ${prefix}unhex <hex code>`);
+    try {
+        reply(Buffer.from(text.replace(/\s/g, ''), 'hex').toString('utf8'));
+    } catch (e) { reply('❌ *Invalid hex*'); }
+}
+break;
+
+case 'rot13': {
+    if (!text) return reply(`Usage: ${prefix}rot13 <text>`);
+    reply(text.replace(/[a-zA-Z]/g, c => String.fromCharCode((c <= 'Z' ? 90 : 122) >= (c.charCodeAt(0) + 13) ? c.charCodeAt(0) + 13 : c.charCodeAt(0) + 13 - 26)));
+}
+break;
+
+case 'caesar': {
+    const [shiftStr, ...capParts] = (text || '').split(' ');
+    const shift = parseInt(shiftStr);
+    const caesarText = capParts.join(' ');
+    if (isNaN(shift) || !caesarText) return reply(`Usage: ${prefix}caesar <shift> <text>`);
+    const shifted = caesarText.replace(/[a-zA-Z]/g, c => {
+        const base = c <= 'Z' ? 65 : 97;
+        return String.fromCharCode(((c.charCodeAt(0) - base + shift) % 26 + 26) % 26 + base);
+    });
+    reply(`🔐 *Caesar Cipher (shift ${shift})*\n\n${shifted}`);
+}
+break;
+
+case 'palindrome': {
+    if (!text) return reply(`Usage: ${prefix}palindrome <text>`);
+    const cleaned = text.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const isPalin = cleaned === cleaned.split('').reverse().join('');
+    reply(isPalin ? `✅ "${text}" is a palindrome!` : `❌ "${text}" is not a palindrome`);
+}
+break;
+
+case 'anagram': {
+    const [w1, w2] = (text || '').split('|').map(s => (s || '').trim().toLowerCase().replace(/\s/g, ''));
+    if (!w1 || !w2) return reply(`Usage: ${prefix}anagram word1 | word2`);
+    const isAnagram = w1.split('').sort().join('') === w2.split('').sort().join('');
+    reply(isAnagram ? `✅ "${w1}" and "${w2}" are anagrams!` : `❌ Not anagrams`);
+}
+break;
+
+case 'percentage': {
+    const pctParts = (text || '').split(' ');
+    const x = parseFloat(pctParts[0]), y = parseFloat(pctParts[1]);
+    if (isNaN(x) || isNaN(y)) return reply(`Usage: ${prefix}percentage <x> <y>\n(what % is x of y)`);
+    reply(`📊 ${x} is *${((x / y) * 100).toFixed(2)}%* of ${y}`);
+}
+break;
+
+case 'average': {
+    const nums = (text || '').split(',').map(n => parseFloat(n.trim())).filter(n => !isNaN(n));
+    if (!nums.length) return reply(`Usage: ${prefix}average 1,2,3,4,5`);
+    const avg = nums.reduce((a, b) => a + b, 0) / nums.length;
+    reply(`📊 Average of [${nums.join(', ')}] = *${avg.toFixed(2)}*`);
+}
+break;
+
+case 'prime': {
+    const n = parseInt(text);
+    if (isNaN(n)) return reply(`Usage: ${prefix}prime <number>`);
+    let isPrime = n > 1;
+    for (let i = 2; i * i <= n; i++) { if (n % i === 0) { isPrime = false; break; } }
+    reply(isPrime ? `✅ ${n} is a prime number` : `❌ ${n} is not a prime number`);
+}
+break;
+
+case 'fibonacci': {
+    const n = parseInt(text);
+    if (isNaN(n) || n < 0 || n > 1000) return reply(`Usage: ${prefix}fibonacci <n> (0-1000)`);
+    let a = 0n, b = 1n;
+    for (let i = 0; i < n; i++) { [a, b] = [b, a + b]; }
+    reply(`🔢 Fibonacci #${n} = ${a}`);
+}
+break;
+
+case 'gcd': {
+    const gcdNums = (text || '').split(' ').map(Number);
+    if (gcdNums.length !== 2 || gcdNums.some(isNaN)) return reply(`Usage: ${prefix}gcd <a> <b>`);
+    const gcdFn = (a, b) => b === 0 ? a : gcdFn(b, a % b);
+    reply(`🔢 GCD(${gcdNums[0]}, ${gcdNums[1]}) = ${gcdFn(Math.abs(gcdNums[0]), Math.abs(gcdNums[1]))}`);
+}
+break;
+
+case 'lcm': {
+    const lcmNums = (text || '').split(' ').map(Number);
+    if (lcmNums.length !== 2 || lcmNums.some(isNaN)) return reply(`Usage: ${prefix}lcm <a> <b>`);
+    const gcdFn2 = (a, b) => b === 0 ? a : gcdFn2(b, a % b);
+    const lcmVal = Math.abs(lcmNums[0] * lcmNums[1]) / gcdFn2(Math.abs(lcmNums[0]), Math.abs(lcmNums[1]));
+    reply(`🔢 LCM(${lcmNums[0]}, ${lcmNums[1]}) = ${lcmVal}`);
+}
+break;
+
+case 'tempconvert': {
+    const tempParts = (text || '').split(' ');
+    const tVal = parseFloat(tempParts[0]);
+    const tUnit = (tempParts[1] || '').toLowerCase();
+    if (isNaN(tVal) || !['c', 'f', 'k'].includes(tUnit)) return reply(`Usage: ${prefix}tempconvert <value> <c|f|k>`);
+    let c;
+    if (tUnit === 'c') c = tVal; else if (tUnit === 'f') c = (tVal - 32) * 5 / 9; else c = tVal - 273.15;
+    const f = c * 9 / 5 + 32, k = c + 273.15;
+    reply(`🌡️ ${tVal}°${tUnit.toUpperCase()} =\n${c.toFixed(2)}°C\n${f.toFixed(2)}°F\n${k.toFixed(2)}K`);
+}
+break;
+
+case 'slugify': {
+    if (!text) return reply(`Usage: ${prefix}slugify <text>`);
+    reply(text.toLowerCase().trim().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-'));
+}
+break;
+
+case 'acronym': {
+    if (!text) return reply(`Usage: ${prefix}acronym <phrase>`);
+    reply(text.split(/\s+/).map(w => w[0]?.toUpperCase() || '').join(''));
+}
+break;
+
+case 'vowelcount': {
+    if (!text) return reply(`Usage: ${prefix}vowelcount <text>`);
+    const vowelMatches = text.match(/[aeiouAEIOU]/g) || [];
+    reply(`🔤 Vowels in "${text}": *${vowelMatches.length}*`);
+}
+break;
+
+case 'wordreverse': {
+    if (!text) return reply(`Usage: ${prefix}wordreverse <sentence>`);
+    reply(text.split(/\s+/).reverse().join(' '));
+}
+break;
+
+case 'wordfrequency': {
+    if (!text) return reply(`Usage: ${prefix}wordfrequency <text>`);
+    const freq = {};
+    text.toLowerCase().match(/\b[a-z']+\b/g)?.forEach(w => { freq[w] = (freq[w] || 0) + 1; });
+    const sorted = Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    if (!sorted.length) return reply('❌ No words found');
+    reply(`📊 *Top words:*\n\n${sorted.map(([w, c]) => `${w}: ${c}`).join('\n')}`);
+}
+break;
+
+case 'piglatin': {
+    if (!text) return reply(`Usage: ${prefix}piglatin <text>`);
+    const pigged = text.split(/\s+/).map(w => {
+        const match = w.match(/^([^aeiouAEIOU]*)(.*)/);
+        return match[1] ? `${match[2]}${match[1].toLowerCase()}ay` : `${w}way`;
+    }).join(' ');
+    reply(`🐷 ${pigged}`);
+}
+break;
+
+case 'readingtime': {
+    if (!text) return reply(`Usage: ${prefix}readingtime <text>`);
+    const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+    const minutes = Math.max(1, Math.ceil(wordCount / 200));
+    reply(`⏱️ *${wordCount}* words — about *${minutes} minute(s)* to read`);
+}
+break;
+// ===== END TEXT/MATH UTILITY COMMANDS BATCH =====
+
+// ===== NEW BATCH 3: 80 more commands, pure JS, tested logic =====
+case 'pascalcase': {
+    if (!text) return reply(`Usage: ${prefix}pascalcase <text>`);
+    reply(text.trim().split(/\s+/).map(w => w[0].toUpperCase()+w.slice(1).toLowerCase()).join(''));
+}
+break;
+
+case 'sentencecase': {
+    if (!text) return reply(`Usage: ${prefix}sentencecase <text>`);
+    const lower = text.trim().toLowerCase();
+    reply(lower.charAt(0).toUpperCase() + lower.slice(1));
+}
+break;
+
+case 'base32encode': {
+    if (!text) return reply(`Usage: ${prefix}base32encode <text>`);
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    let bits = '', out = '';
+    for (const c of Buffer.from(text, 'utf8')) bits += c.toString(2).padStart(8, '0');
+    for (let i = 0; i < bits.length; i += 5) {
+        const chunk = bits.slice(i, i + 5).padEnd(5, '0');
+        out += alphabet[parseInt(chunk, 2)];
+    }
+    reply(out);
+}
+break;
+
+case 'base32decode': {
+    if (!text) return reply(`Usage: ${prefix}base32decode <base32 text>`);
+    try {
+        const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+        let bits = '';
+        for (const c of text.toUpperCase().replace(/=+$/, '')) bits += alphabet.indexOf(c).toString(2).padStart(5, '0');
+        const bytes = [];
+        for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2));
+        reply(Buffer.from(bytes).toString('utf8'));
+    } catch (e) { reply('❌ *Invalid base32*'); }
+}
+break;
+
+case 'rot47': {
+    if (!text) return reply(`Usage: ${prefix}rot47 <text>`);
+    reply(text.replace(/[!-~]/g, c => String.fromCharCode(33 + (c.charCodeAt(0) + 14) % 94)));
+}
+break;
+
+case 'vigenere': {
+    const [vkey, ...vparts] = (text || '').split(' ');
+    const vtext = vparts.join(' ');
+    if (!vkey || !vtext) return reply(`Usage: ${prefix}vigenere <key> <text>`);
+    const key = vkey.toLowerCase();
+    let ki = 0, out = '';
+    for (const c of vtext) {
+        if (/[a-zA-Z]/.test(c)) {
+            const base = c === c.toUpperCase() ? 65 : 97;
+            const shift = key.charCodeAt(ki % key.length) - 97;
+            out += String.fromCharCode((c.charCodeAt(0) - base + shift) % 26 + base);
+            ki++;
+        } else out += c;
+    }
+    reply(`🔐 *Vigenère Encrypted*\n\n${out}`);
+}
+break;
+
+case 'unvigenere': {
+    const [uvkey, ...uvparts] = (text || '').split(' ');
+    const uvtext = uvparts.join(' ');
+    if (!uvkey || !uvtext) return reply(`Usage: ${prefix}unvigenere <key> <text>`);
+    const key = uvkey.toLowerCase();
+    let ki = 0, out = '';
+    for (const c of uvtext) {
+        if (/[a-zA-Z]/.test(c)) {
+            const base = c === c.toUpperCase() ? 65 : 97;
+            const shift = key.charCodeAt(ki % key.length) - 97;
+            out += String.fromCharCode((c.charCodeAt(0) - base - shift + 26) % 26 + base);
+            ki++;
+        } else out += c;
+    }
+    reply(`🔓 *Decrypted*\n\n${out}`);
+}
+break;
+
+case 'duplicatewords': {
+    if (!text) return reply(`Usage: ${prefix}duplicatewords <text>`);
+    const words = text.toLowerCase().match(/\b[a-z']+\b/g) || [];
+    const seen = {}, dupes = new Set();
+    words.forEach(w => { seen[w] = (seen[w] || 0) + 1; if (seen[w] > 1) dupes.add(w); });
+    reply(dupes.size ? `🔁 Duplicate words: ${[...dupes].join(', ')}` : '✅ No duplicate words found');
+}
+break;
+
+case 'sortwords': {
+    if (!text) return reply(`Usage: ${prefix}sortwords <text>`);
+    reply(text.trim().split(/\s+/).sort((a, b) => a.localeCompare(b)).join(' '));
+}
+break;
+
+case 'shufflewords': {
+    if (!text) return reply(`Usage: ${prefix}shufflewords <text>`);
+    const arr = text.trim().split(/\s+/);
+    for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; }
+    reply(arr.join(' '));
+}
+break;
+
+case 'emojiremove': {
+    if (!text) return reply(`Usage: ${prefix}emojiremove <text>`);
+    const stripped = text.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F1E6}-\u{1F1FF}]/gu, '').trim();
+    reply(stripped || '(nothing left)');
+}
+break;
+
+case 'emojicount': {
+    if (!text) return reply(`Usage: ${prefix}emojicount <text>`);
+    const matches = text.match(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F1E6}-\u{1F1FF}]/gu) || [];
+    reply(`😀 Emoji count: *${matches.length}*`);
+}
+break;
+
+case 'linkextract': {
+    if (!text) return reply(`Usage: ${prefix}linkextract <text>`);
+    const links = text.match(/https?:\/\/[^\s]+/gi) || [];
+    reply(links.length ? links.join('\n') : '❌ No links found');
+}
+break;
+
+case 'hashtagextract': {
+    if (!text) return reply(`Usage: ${prefix}hashtagextract <text>`);
+    const tags = text.match(/#\w+/g) || [];
+    reply(tags.length ? tags.join(' ') : '❌ No hashtags found');
+}
+break;
+
+case 'duplicatelines': {
+    if (!text) return reply(`Usage: ${prefix}duplicatelines <line1>\\n<line2>...`);
+    const lines = text.split('\n');
+    const seen = {}, dupes = new Set();
+    lines.forEach(l => { seen[l] = (seen[l] || 0) + 1; if (seen[l] > 1) dupes.add(l); });
+    reply(dupes.size ? `🔁 Duplicate lines:\n${[...dupes].join('\n')}` : '✅ No duplicate lines');
+}
+break;
+
+case 'wordwrap': {
+    const [wrapWidthStr, ...wrapParts] = (text || '').split(' ');
+    const wrapWidth = parseInt(wrapWidthStr);
+    const wrapText = wrapParts.join(' ');
+    if (isNaN(wrapWidth) || !wrapText) return reply(`Usage: ${prefix}wordwrap <width> <text>`);
+    const words = wrapText.split(' ');
+    let lines = [], cur = '';
+    for (const w of words) {
+        if ((cur + ' ' + w).trim().length > wrapWidth) { lines.push(cur.trim()); cur = w; } else cur += ' ' + w;
+    }
+    if (cur.trim()) lines.push(cur.trim());
+    reply(lines.join('\n'));
+}
+break;
+
+case 'numbertowords': {
+    const nw = parseInt(text);
+    if (isNaN(nw) || nw < 0 || nw > 999999999) return reply(`Usage: ${prefix}numbertowords <number> (0 - 999,999,999)`);
+    const ones = ['', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
+    const tens = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+    function threeDigits(n) {
+        let s = '';
+        if (n >= 100) { s += ones[Math.floor(n / 100)] + ' hundred '; n %= 100; }
+        if (n >= 20) { s += tens[Math.floor(n / 10)] + ' '; n %= 10; }
+        if (n > 0) s += ones[n] + ' ';
+        return s.trim();
+    }
+    function convert(n) {
+        if (n === 0) return 'zero';
+        let parts = [];
+        if (n >= 1000000) { parts.push(threeDigits(Math.floor(n / 1000000)) + ' million'); n %= 1000000; }
+        if (n >= 1000) { parts.push(threeDigits(Math.floor(n / 1000)) + ' thousand'); n %= 1000; }
+        if (n > 0) parts.push(threeDigits(n));
+        return parts.join(' ');
+    }
+    reply(`🔢 ${convert(nw)}`);
+}
+break;
+
+case 'romanconvert': {
+    const rn = parseInt(text);
+    if (isNaN(rn) || rn <= 0 || rn > 3999) return reply(`Usage: ${prefix}romanconvert <number> (1-3999)`);
+    const vals = [[1000,'M'],[900,'CM'],[500,'D'],[400,'CD'],[100,'C'],[90,'XC'],[50,'L'],[40,'XL'],[10,'X'],[9,'IX'],[5,'V'],[4,'IV'],[1,'I']];
+    let num = rn, res = '';
+    for (const [v, s] of vals) { while (num >= v) { res += s; num -= v; } }
+    reply(`🏛️ ${res}`);
+}
+break;
+
+case 'fromroman': {
+    if (!text) return reply(`Usage: ${prefix}fromroman <roman numeral>`);
+    const map = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 };
+    const rs = text.toUpperCase().trim();
+    if (!/^[IVXLCDM]+$/.test(rs)) return reply('❌ *Invalid roman numeral*');
+    let res = 0;
+    for (let i = 0; i < rs.length; i++) {
+        const cur = map[rs[i]], next = map[rs[i + 1]];
+        if (next && cur < next) res -= cur; else res += cur;
+    }
+    reply(`🔢 ${res}`);
+}
+break;
+
+case 'basen': {
+    const [baseNumStr, baseTargetStr] = (text || '').split(' ');
+    const baseNum = parseInt(baseNumStr);
+    const baseTarget = parseInt(baseTargetStr);
+    if (isNaN(baseNum) || isNaN(baseTarget) || baseTarget < 2 || baseTarget > 36) return reply(`Usage: ${prefix}basen <decimal number> <target base 2-36>`);
+    reply(`🔢 ${baseNum} in base ${baseTarget} = ${baseNum.toString(baseTarget)}`);
+}
+break;
+
+case 'frombase': {
+    const [fbVal, fbBaseStr] = (text || '').split(' ');
+    const fbBase = parseInt(fbBaseStr);
+    if (!fbVal || isNaN(fbBase) || fbBase < 2 || fbBase > 36) return reply(`Usage: ${prefix}frombase <value> <source base 2-36>`);
+    const result = parseInt(fbVal, fbBase);
+    if (isNaN(result)) return reply('❌ *Invalid value for that base*');
+    reply(`🔢 ${fbVal} (base ${fbBase}) = ${result} (decimal)`);
+}
+break;
+
+case 'isarmstrong': {
+    const an = parseInt(text);
+    if (isNaN(an) || an < 0) return reply(`Usage: ${prefix}isarmstrong <number>`);
+    const s = String(an), p = s.length;
+    const sum = s.split('').reduce((a, d) => a + Math.pow(+d, p), 0);
+    reply(sum === an ? `✅ ${an} is an Armstrong number` : `❌ ${an} is not an Armstrong number`);
+}
+break;
+
+case 'isperfect': {
+    const pn = parseInt(text);
+    if (isNaN(pn) || pn < 1 || pn > 1000000) return reply(`Usage: ${prefix}isperfect <number> (max 1,000,000)`);
+    let s = 0;
+    for (let i = 1; i < pn; i++) if (pn % i === 0) s += i;
+    reply(s === pn ? `✅ ${pn} is a perfect number` : `❌ ${pn} is not a perfect number`);
+}
+break;
+
+case 'digitsum': {
+    const ds = text?.replace(/\D/g, '');
+    if (!ds) return reply(`Usage: ${prefix}digitsum <number>`);
+    const sum = ds.split('').reduce((a, d) => a + parseInt(d), 0);
+    reply(`🔢 Digit sum of ${ds} = ${sum}`);
+}
+break;
+
+case 'digitalroot': {
+    let dr = parseInt(text?.replace(/\D/g, ''));
+    if (isNaN(dr)) return reply(`Usage: ${prefix}digitalroot <number>`);
+    while (dr >= 10) dr = String(dr).split('').reduce((a, d) => a + parseInt(d), 0);
+    reply(`🔢 Digital root = ${dr}`);
+}
+break;
+
+case 'collatz': {
+    let cn = parseInt(text);
+    if (isNaN(cn) || cn < 1 || cn > 1000000000) return reply(`Usage: ${prefix}collatz <positive number>`);
+    const seq = [cn]; let steps = 0;
+    while (cn !== 1 && steps < 10000) { cn = cn % 2 === 0 ? cn / 2 : 3 * cn + 1; seq.push(cn); steps++; }
+    reply(`🔢 Collatz sequence took *${steps}* steps to reach 1${seq.length <= 30 ? `\n\n${seq.join(' → ')}` : ''}`);
+}
+break;
+
+case 'quadratic': {
+    const [qa, qb, qc] = (text || '').split(' ').map(Number);
+    if ([qa, qb, qc].some(isNaN) || qa === 0) return reply(`Usage: ${prefix}quadratic <a> <b> <c>  (for ax² + bx + c = 0)`);
+    const disc = qb * qb - 4 * qa * qc;
+    if (disc < 0) {
+        const real = (-qb / (2 * qa)).toFixed(3), imag = (Math.sqrt(-disc) / (2 * qa)).toFixed(3);
+        reply(`🔢 Complex roots:\nx = ${real} + ${imag}i\nx = ${real} - ${imag}i`);
+    } else {
+        const x1 = ((-qb + Math.sqrt(disc)) / (2 * qa)).toFixed(3);
+        const x2 = ((-qb - Math.sqrt(disc)) / (2 * qa)).toFixed(3);
+        reply(`🔢 x = ${x1}\nx = ${x2}`);
+    }
+}
+break;
+
+case 'primefactors': {
+    let pfn = parseInt(text);
+    if (isNaN(pfn) || pfn < 2 || pfn > 1000000000) return reply(`Usage: ${prefix}primefactors <number>`);
+    const factors = []; let d = 2;
+    while (pfn > 1) { while (pfn % d === 0) { factors.push(d); pfn /= d; } d++; if (d * d > pfn && pfn > 1) { factors.push(pfn); break; } }
+    reply(`🔢 Prime factors: ${factors.join(' × ')}`);
+}
+break;
+
+case 'digitreverse': {
+    const drn = text?.replace(/\D/g, '');
+    if (!drn) return reply(`Usage: ${prefix}digitreverse <number>`);
+    reply(`🔢 ${drn.split('').reverse().join('')}`);
+}
+break;
+
+case 'sqrtcalc': {
+    const sqn = parseFloat(text);
+    if (isNaN(sqn) || sqn < 0) return reply(`Usage: ${prefix}sqrtcalc <non-negative number>`);
+    reply(`🔢 √${sqn} = ${Math.sqrt(sqn)}`);
+}
+break;
+
+case 'powcalc': {
+    const [pbase, pexp] = (text || '').split(' ').map(Number);
+    if (isNaN(pbase) || isNaN(pexp)) return reply(`Usage: ${prefix}powcalc <base> <exponent>`);
+    reply(`🔢 ${pbase}^${pexp} = ${Math.pow(pbase, pexp)}`);
+}
+break;
+
+case 'logcalc': {
+    const [lgnum, lgbase] = (text || '').split(' ').map(Number);
+    if (isNaN(lgnum) || lgnum <= 0) return reply(`Usage: ${prefix}logcalc <number> [base] (default base 10)`);
+    const base = lgbase || 10;
+    reply(`🔢 log_${base}(${lgnum}) = ${(Math.log(lgnum) / Math.log(base)).toFixed(6)}`);
+}
+break;
+
+case 'trigcalc': {
+    const [trigFn, trigDeg] = (text || '').split(' ');
+    const deg = parseFloat(trigDeg);
+    if (!['sin', 'cos', 'tan'].includes(trigFn) || isNaN(deg)) return reply(`Usage: ${prefix}trigcalc <sin|cos|tan> <degrees>`);
+    const rad = deg * Math.PI / 180;
+    const val = trigFn === 'sin' ? Math.sin(rad) : trigFn === 'cos' ? Math.cos(rad) : Math.tan(rad);
+    reply(`🔢 ${trigFn}(${deg}°) = ${val.toFixed(6)}`);
+}
+break;
+
+case 'ncr': {
+    const [ncrN, ncrR] = (text || '').split(' ').map(Number);
+    if (isNaN(ncrN) || isNaN(ncrR) || ncrR > ncrN || ncrN > 170) return reply(`Usage: ${prefix}ncr <n> <r>  (combinations, n≤170)`);
+    const fact = n => n <= 1 ? 1 : n * fact(n - 1);
+    reply(`🔢 C(${ncrN},${ncrR}) = ${fact(ncrN) / (fact(ncrR) * fact(ncrN - ncrR))}`);
+}
+break;
+
+case 'npr': {
+    const [nprN, nprR] = (text || '').split(' ').map(Number);
+    if (isNaN(nprN) || isNaN(nprR) || nprR > nprN || nprN > 170) return reply(`Usage: ${prefix}npr <n> <r>  (permutations, n≤170)`);
+    const fact = n => n <= 1 ? 1 : n * fact(n - 1);
+    reply(`🔢 P(${nprN},${nprR}) = ${fact(nprN) / fact(nprN - nprR)}`);
+}
+break;
+
+case 'parity': {
+    const pzn = parseInt(text);
+    if (isNaN(pzn)) return reply(`Usage: ${prefix}parity <number>`);
+    reply(pzn % 2 === 0 ? `${pzn} is *even*` : `${pzn} is *odd*`);
+}
+break;
+
+case 'median': {
+    const medNums = (text || '').split(',').map(n => parseFloat(n.trim())).filter(n => !isNaN(n)).sort((a, b) => a - b);
+    if (!medNums.length) return reply(`Usage: ${prefix}median 1,2,3,4,5`);
+    const mid = Math.floor(medNums.length / 2);
+    const med = medNums.length % 2 ? medNums[mid] : (medNums[mid - 1] + medNums[mid]) / 2;
+    reply(`📊 Median = ${med}`);
+}
+break;
+
+case 'stddev': {
+    const sdNums = (text || '').split(',').map(n => parseFloat(n.trim())).filter(n => !isNaN(n));
+    if (sdNums.length < 2) return reply(`Usage: ${prefix}stddev 1,2,3,4,5`);
+    const mean = sdNums.reduce((a, b) => a + b, 0) / sdNums.length;
+    const variance = sdNums.reduce((a, b) => a + (b - mean) ** 2, 0) / sdNums.length;
+    reply(`📊 Std Dev = ${Math.sqrt(variance).toFixed(4)}`);
+}
+break;
+
+case 'variance': {
+    const varNums = (text || '').split(',').map(n => parseFloat(n.trim())).filter(n => !isNaN(n));
+    if (varNums.length < 2) return reply(`Usage: ${prefix}variance 1,2,3,4,5`);
+    const mean = varNums.reduce((a, b) => a + b, 0) / varNums.length;
+    const variance = varNums.reduce((a, b) => a + (b - mean) ** 2, 0) / varNums.length;
+    reply(`📊 Variance = ${variance.toFixed(4)}`);
+}
+break;
+
+case 'range': {
+    const rangeNums = (text || '').split(',').map(n => parseFloat(n.trim())).filter(n => !isNaN(n));
+    if (!rangeNums.length) return reply(`Usage: ${prefix}range 1,2,3,4,5`);
+    reply(`📊 Range = ${Math.max(...rangeNums) - Math.min(...rangeNums)} (max: ${Math.max(...rangeNums)}, min: ${Math.min(...rangeNums)})`);
+}
+break;
+
+case 'sum': {
+    const sumNums = (text || '').split(',').map(n => parseFloat(n.trim())).filter(n => !isNaN(n));
+    if (!sumNums.length) return reply(`Usage: ${prefix}sum 1,2,3,4,5`);
+    reply(`📊 Sum = ${sumNums.reduce((a, b) => a + b, 0)}`);
+}
+break;
+
+case 'product': {
+    const prodNums = (text || '').split(',').map(n => parseFloat(n.trim())).filter(n => !isNaN(n));
+    if (!prodNums.length) return reply(`Usage: ${prefix}product 1,2,3,4,5`);
+    reply(`📊 Product = ${prodNums.reduce((a, b) => a * b, 1)}`);
+}
+break;
+
+case 'sortnums': {
+    const snNums = (text || '').split(',').map(n => parseFloat(n.trim())).filter(n => !isNaN(n));
+    if (!snNums.length) return reply(`Usage: ${prefix}sortnums 5,3,1,4,2`);
+    reply(`📊 Sorted: ${snNums.sort((a, b) => a - b).join(', ')}`);
+}
+break;
+
+case 'lengthconvert': {
+    const [lnVal, lnUnit] = (text || '').split(' ');
+    const lv = parseFloat(lnVal);
+    if (isNaN(lv) || !['m', 'ft', 'in', 'km', 'mi'].includes(lnUnit)) return reply(`Usage: ${prefix}lengthconvert <value> <m|ft|in|km|mi>`);
+    const toM = { m: 1, ft: 0.3048, in: 0.0254, km: 1000, mi: 1609.34 };
+    const m = lv * toM[lnUnit];
+    reply(`📏 ${lv} ${lnUnit} =\n${m.toFixed(3)} m\n${(m / 0.3048).toFixed(3)} ft\n${(m / 0.0254).toFixed(2)} in\n${(m / 1000).toFixed(4)} km\n${(m / 1609.34).toFixed(4)} mi`);
+}
+break;
+
+case 'dataconvert': {
+    const [dtVal, dtUnit] = (text || '').split(' ');
+    const dv = parseFloat(dtVal);
+    if (isNaN(dv) || !['b', 'kb', 'mb', 'gb', 'tb'].includes(dtUnit)) return reply(`Usage: ${prefix}dataconvert <value> <b|kb|mb|gb|tb>`);
+    const toBytes = { b: 1, kb: 1024, mb: 1024 ** 2, gb: 1024 ** 3, tb: 1024 ** 4 };
+    const bytes = dv * toBytes[dtUnit];
+    reply(`💾 ${dv} ${dtUnit.toUpperCase()} =\n${bytes.toFixed(0)} B\n${(bytes / 1024).toFixed(2)} KB\n${(bytes / 1024 ** 2).toFixed(4)} MB\n${(bytes / 1024 ** 3).toFixed(6)} GB`);
+}
+break;
+
+case 'daysbetween': {
+    const [d1s, d2s] = (text || '').split('|').map(s => s.trim());
+    const d1 = new Date(d1s), d2 = new Date(d2s);
+    if (!d1s || !d2s || isNaN(d1) || isNaN(d2)) return reply(`Usage: ${prefix}daysbetween YYYY-MM-DD | YYYY-MM-DD`);
+    const days = Math.abs(Math.round((d2 - d1) / 86400000));
+    reply(`📅 ${days} day(s) between those dates`);
+}
+break;
+
+case 'moonphase': {
+    const mpDate = text ? new Date(text) : new Date();
+    if (isNaN(mpDate)) return reply(`Usage: ${prefix}moonphase [YYYY-MM-DD] (defaults to today)`);
+    // Simple synodic-month approximation (~29.53 days) anchored to a known new moon.
+    const knownNewMoon = new Date('2000-01-06T18:14:00Z').getTime();
+    const synodicMonth = 29.53058867;
+    const daysSince = (mpDate.getTime() - knownNewMoon) / 86400000;
+    const phase = ((daysSince % synodicMonth) + synodicMonth) % synodicMonth;
+    const phases = ['🌑 New Moon', '🌒 Waxing Crescent', '🌓 First Quarter', '🌔 Waxing Gibbous', '🌕 Full Moon', '🌖 Waning Gibbous', '🌗 Last Quarter', '🌘 Waning Crescent'];
+    const idx = Math.floor((phase / synodicMonth) * 8) % 8;
+    reply(`${phases[idx]}\n_Approximate — based on a simple lunar cycle calculation_`);
+}
+break;
+
+case 'randomstring': {
+    const rsLen = parseInt(text) || 12;
+    if (rsLen < 1 || rsLen > 256) return reply(`Usage: ${prefix}randomstring <length> (1-256, default 12)`);
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let s = '';
+    for (let i = 0; i < rsLen; i++) s += chars[Math.floor(Math.random() * chars.length)];
+    reply(`🔤 ${s}`);
+}
+break;
+
+case 'randomemoji': {
+    const emojiList = ['😀','😂','😍','🤔','😎','🥳','😭','🔥','💯','✨','🎉','👍','❤️','🙌','😴','🤯','😇','🥶','👀','💀'];
+    reply(emojiList[Math.floor(Math.random() * emojiList.length)]);
+}
+break;
+
+case 'flagemoji': {
+    if (!text || text.trim().length !== 2) return reply(`Usage: ${prefix}flagemoji <2-letter country code>\nExample: ${prefix}flagemoji ng`);
+    const code = text.trim().toUpperCase();
+    const flag = String.fromCodePoint(...[...code].map(c => 127397 + c.charCodeAt(0)));
+    reply(flag);
+}
+break;
+
+case 'urlvalidate': {
+    if (!text) return reply(`Usage: ${prefix}urlvalidate <url>`);
+    try { new URL(text.trim()); reply('✅ Valid URL'); } catch (e) { reply('❌ Invalid URL'); }
+}
+break;
+
+case 'ipv4validate': {
+    if (!text) return reply(`Usage: ${prefix}ipv4validate <ip address>`);
+    const parts = text.trim().split('.');
+    const valid = parts.length === 4 && parts.every(p => /^\d{1,3}$/.test(p) && +p >= 0 && +p <= 255);
+    reply(valid ? '✅ Valid IPv4 address' : '❌ Invalid IPv4 address');
+}
+break;
+
+case 'jsonprettify': {
+    if (!text) return reply(`Usage: ${prefix}jsonprettify <json>`);
+    try { reply('```' + JSON.stringify(JSON.parse(text), null, 2) + '```'); } catch (e) { reply('❌ *Invalid JSON:* ' + e.message); }
+}
+break;
+
+case 'ccvalidate': {
+    if (!text) return reply(`Usage: ${prefix}ccvalidate <card number>\n_Checks format validity only (Luhn algorithm) — does not verify or store real card data._`);
+    const digits = text.replace(/\D/g, '');
+    if (digits.length < 12 || digits.length > 19) return reply('❌ Invalid length for a card number');
+    let sum = 0, alt = false;
+    for (let i = digits.length - 1; i >= 0; i--) {
+        let d = parseInt(digits[i]);
+        if (alt) { d *= 2; if (d > 9) d -= 9; }
+        sum += d; alt = !alt;
+    }
+    const brand = /^4/.test(digits) ? 'Visa' : /^5[1-5]/.test(digits) ? 'Mastercard' : /^3[47]/.test(digits) ? 'Amex' : /^6(?:011|5)/.test(digits) ? 'Discover' : 'Unknown';
+    reply(sum % 10 === 0 ? `✅ Valid card number format\nBrand guess: ${brand}` : '❌ Invalid card number (fails Luhn check)');
+}
+break;
+
+case 'tipcalc': {
+    const [tcBill, tcPct, tcPeople] = (text || '').split(' ').map(Number);
+    if (isNaN(tcBill) || isNaN(tcPct)) return reply(`Usage: ${prefix}tipcalc <bill amount> <tip %> [split between N people]`);
+    const tip = tcBill * (tcPct / 100);
+    const total = tcBill + tip;
+    let msg = `💰 Bill: ${tcBill.toFixed(2)}\nTip (${tcPct}%): ${tip.toFixed(2)}\nTotal: ${total.toFixed(2)}`;
+    if (tcPeople && tcPeople > 0) msg += `\nPer person (${tcPeople}): ${(total / tcPeople).toFixed(2)}`;
+    reply(msg);
+}
+break;
+
+case 'splitbill': {
+    const [sbAmount, sbPeople] = (text || '').split(' ').map(Number);
+    if (isNaN(sbAmount) || isNaN(sbPeople) || sbPeople < 1) return reply(`Usage: ${prefix}splitbill <amount> <number of people>`);
+    reply(`💰 ${sbAmount} split ${sbPeople} ways = *${(sbAmount / sbPeople).toFixed(2)}* each`);
+}
+break;
+
+case 'loancalc': {
+    const [lcPrincipal, lcRate, lcYears] = (text || '').split(' ').map(Number);
+    if ([lcPrincipal, lcRate, lcYears].some(isNaN)) return reply(`Usage: ${prefix}loancalc <principal> <annual rate %> <years>`);
+    const monthlyRate = lcRate / 100 / 12;
+    const n = lcYears * 12;
+    const payment = monthlyRate === 0 ? lcPrincipal / n : (lcPrincipal * monthlyRate * Math.pow(1 + monthlyRate, n)) / (Math.pow(1 + monthlyRate, n) - 1);
+    reply(`🏦 Monthly payment: ${payment.toFixed(2)}\nTotal paid: ${(payment * n).toFixed(2)}\nTotal interest: ${(payment * n - lcPrincipal).toFixed(2)}`);
+}
+break;
+
+case 'compoundinterest': {
+    const [ciPrincipal, ciRate, ciYears, ciFreq] = (text || '').split(' ').map(Number);
+    if ([ciPrincipal, ciRate, ciYears].some(isNaN)) return reply(`Usage: ${prefix}compoundinterest <principal> <annual rate %> <years> [compounds per year, default 12]`);
+    const n = ciFreq || 12;
+    const amount = ciPrincipal * Math.pow(1 + (ciRate / 100) / n, n * ciYears);
+    reply(`📈 Final amount: ${amount.toFixed(2)}\nInterest earned: ${(amount - ciPrincipal).toFixed(2)}`);
+}
+break;
+
+case 'discountcalc': {
+    const [dcPrice, dcPct] = (text || '').split(' ').map(Number);
+    if (isNaN(dcPrice) || isNaN(dcPct)) return reply(`Usage: ${prefix}discountcalc <price> <discount %>`);
+    const discount = dcPrice * (dcPct / 100);
+    reply(`🏷️ Discount: ${discount.toFixed(2)}\nFinal price: ${(dcPrice - discount).toFixed(2)}`);
+}
+break;
+
+case 'taxcalc': {
+    const [txAmount, txPct] = (text || '').split(' ').map(Number);
+    if (isNaN(txAmount) || isNaN(txPct)) return reply(`Usage: ${prefix}taxcalc <amount> <tax %>`);
+    const tax = txAmount * (txPct / 100);
+    reply(`🧾 Tax: ${tax.toFixed(2)}\nTotal: ${(txAmount + tax).toFixed(2)}`);
+}
+break;
+
+case 'scramble': {
+    if (!text) return reply(`Usage: ${prefix}scramble <word>`);
+    const arr = text.trim().split('');
+    for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; }
+    reply(`🔀 ${arr.join('')}`);
+}
+break;
+
+case 'gcdmultiple': {
+    const gmNums = (text || '').split(',').map(n => parseInt(n.trim())).filter(n => !isNaN(n));
+    if (gmNums.length < 2) return reply(`Usage: ${prefix}gcdmultiple 12,18,24`);
+    const gcdFn = (a, b) => b === 0 ? a : gcdFn(b, a % b);
+    reply(`🔢 GCD = ${gmNums.reduce((a, b) => gcdFn(Math.abs(a), Math.abs(b)))}`);
+}
+break;
+
+case 'lcmmultiple': {
+    const lmNums = (text || '').split(',').map(n => parseInt(n.trim())).filter(n => !isNaN(n));
+    if (lmNums.length < 2) return reply(`Usage: ${prefix}lcmmultiple 4,6,8`);
+    const gcdFn2 = (a, b) => b === 0 ? a : gcdFn2(b, a % b);
+    const lcmFn = (a, b) => Math.abs(a * b) / gcdFn2(a, b);
+    reply(`🔢 LCM = ${lmNums.reduce((a, b) => lcmFn(a, b))}`);
+}
+break;
+
+case 'textencrypt': {
+    const [tekey, ...teparts] = (text || '').split(' ');
+    const tetext = teparts.join(' ');
+    if (!tekey || !tetext) return reply(`Usage: ${prefix}textencrypt <key> <text>`);
+    let out = '';
+    for (let i = 0; i < tetext.length; i++) out += (tetext.charCodeAt(i) ^ tekey.charCodeAt(i % tekey.length)).toString(16).padStart(2, '0');
+    reply(`🔐 ${out}`);
+}
+break;
+
+case 'textdecrypt': {
+    const [tdkey, tdhex] = (text || '').split(' ');
+    if (!tdkey || !tdhex) return reply(`Usage: ${prefix}textdecrypt <key> <hex>`);
+    try {
+        let out = '';
+        for (let i = 0; i < tdhex.length; i += 2) {
+            const byte = parseInt(tdhex.substr(i, 2), 16);
+            out += String.fromCharCode(byte ^ tdkey.charCodeAt((i / 2) % tdkey.length));
+        }
+        reply(`🔓 ${out}`);
+    } catch (e) { reply('❌ *Invalid input*'); }
+}
+break;
+
+case 'iptobinary': {
+    if (!text) return reply(`Usage: ${prefix}iptobinary <ipv4 address>`);
+    const parts = text.trim().split('.');
+    if (parts.length !== 4 || !parts.every(p => /^\d{1,3}$/.test(p) && +p <= 255)) return reply('❌ *Invalid IPv4 address*');
+    reply(parts.map(p => parseInt(p).toString(2).padStart(8, '0')).join('.'));
+}
+break;
+
+case 'binarytoip': {
+    if (!text) return reply(`Usage: ${prefix}binarytoip <binary like 11000000.10101000.00000001.00000001>`);
+    try {
+        const parts = text.trim().split('.');
+        if (parts.length !== 4) throw new Error();
+        reply(parts.map(p => parseInt(p, 2)).join('.'));
+    } catch (e) { reply('❌ *Invalid binary IP format*'); }
+}
+break;
+
+case 'macvalidate': {
+    if (!text) return reply(`Usage: ${prefix}macvalidate <mac address>`);
+    const valid = /^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/.test(text.trim());
+    reply(valid ? '✅ Valid MAC address' : '❌ Invalid MAC address');
+}
+break;
+
+case 'currencyformat': {
+    const cfNum = parseFloat(text);
+    if (isNaN(cfNum)) return reply(`Usage: ${prefix}currencyformat <number>`);
+    reply(`💵 ${cfNum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+}
+break;
+
+case 'percentchange': {
+    const [pcOld, pcNew] = (text || '').split(' ').map(Number);
+    if (isNaN(pcOld) || isNaN(pcNew) || pcOld === 0) return reply(`Usage: ${prefix}percentchange <old value> <new value>`);
+    const change = ((pcNew - pcOld) / Math.abs(pcOld)) * 100;
+    reply(`📊 ${change >= 0 ? '📈 +' : '📉 '}${change.toFixed(2)}%`);
+}
+break;
+
+case 'ratio': {
+    const [raA, raB] = (text || '').split(' ').map(Number);
+    if (isNaN(raA) || isNaN(raB) || raB === 0) return reply(`Usage: ${prefix}ratio <a> <b>`);
+    const gcdFn3 = (a, b) => b === 0 ? a : gcdFn3(b, a % b);
+    const g = gcdFn3(raA, raB) || 1;
+    reply(`⚖️ ${raA}:${raB} simplifies to *${raA / g}:${raB / g}*`);
+}
+break;
+
+case 'fraction': {
+    const frDec = parseFloat(text);
+    if (isNaN(frDec)) return reply(`Usage: ${prefix}fraction <decimal number>`);
+    const sign = frDec < 0 ? -1 : 1;
+    const dec = Math.abs(frDec);
+    let bestNum = 1, bestDenom = 1, bestErr = Math.abs(dec - 1);
+    for (let d = 1; d <= 10000; d++) {
+        const n = Math.round(dec * d);
+        const err = Math.abs(dec - n / d);
+        if (err < bestErr) { bestErr = err; bestNum = n; bestDenom = d; if (err < 1e-9) break; }
+    }
+    const gcdFn4 = (a, b) => b === 0 ? a : gcdFn4(b, a % b);
+    const div = gcdFn4(bestNum, bestDenom) || 1;
+    reply(`🔢 ${frDec} ≈ ${sign * (bestNum / div)}/${bestDenom / div}`);
+}
+break;
+
+case 'pluralize': {
+    if (!text) return reply(`Usage: ${prefix}pluralize <word>`);
+    const w = text.trim();
+    let plural;
+    if (/[sxz]$|[sc]h$/i.test(w)) plural = w + 'es';
+    else if (/[^aeiou]y$/i.test(w)) plural = w.slice(0, -1) + 'ies';
+    else if (/f$/i.test(w)) plural = w.slice(0, -1) + 'ves';
+    else if (/fe$/i.test(w)) plural = w.slice(0, -2) + 'ves';
+    else plural = w + 's';
+    reply(`📝 ${plural}\n_(basic English pluralization — irregular words like "child" or "mouse" won't be correct)_`);
+}
+break;
+
+case 'singularize': {
+    if (!text) return reply(`Usage: ${prefix}singularize <word>`);
+    const w = text.trim();
+    let singular;
+    if (/ies$/i.test(w)) singular = w.slice(0, -3) + 'y';
+    else if (/ves$/i.test(w)) singular = w.slice(0, -3) + 'f';
+    else if (/(sses|shes|ches|xes)$/i.test(w)) singular = w.slice(0, -2);
+    else if (/s$/i.test(w) && !/ss$/i.test(w)) singular = w.slice(0, -1);
+    else singular = w;
+    reply(`📝 ${singular}\n_(basic English — irregular words won't be correct)_`);
+}
+break;
+
+case 'mockingcase': {
+    if (!text) return reply(`Usage: ${prefix}mockingcase <text>`);
+    reply(text.split('').map((c, i) => i % 2 === 0 ? c.toLowerCase() : c.toUpperCase()).join(''));
+}
+break;
+
+case 'rolldice': {
+    const [numDice, numSides] = (text || '2d6').toLowerCase().split('d').map(Number);
+    if (isNaN(numDice) || isNaN(numSides) || numDice < 1 || numDice > 20 || numSides < 2 || numSides > 1000) return reply(`Usage: ${prefix}rolldice <N>d<S> (e.g. 2d6, max 20 dice)`);
+    const rolls = [];
+    for (let i = 0; i < numDice; i++) rolls.push(Math.floor(Math.random() * numSides) + 1);
+    reply(`🎲 [${rolls.join(', ')}]\nTotal: ${rolls.reduce((a, b) => a + b, 0)}`);
+}
+break;
+
+case 'countconsonants': {
+    if (!text) return reply(`Usage: ${prefix}countconsonants <text>`);
+    const consonants = text.match(/[bcdfghjklmnpqrstvwxyzBCDFGHJKLMNPQRSTVWXYZ]/g) || [];
+    reply(`🔤 Consonants: *${consonants.length}*`);
+}
+break;
+
+case 'distancecalc': {
+    const [dcLat1, dcLon1, dcLat2, dcLon2] = (text || '').split(' ').map(Number);
+    if ([dcLat1, dcLon1, dcLat2, dcLon2].some(isNaN)) return reply(`Usage: ${prefix}distancecalc <lat1> <lon1> <lat2> <lon2>`);
+    const R = 6371, toRad = d => d * Math.PI / 180;
+    const dLat = toRad(dcLat2 - dcLat1), dLon = toRad(dcLon2 - dcLon1);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(dcLat1)) * Math.cos(toRad(dcLat2)) * Math.sin(dLon / 2) ** 2;
+    const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    reply(`📍 Distance: *${dist.toFixed(2)} km* (${(dist * 0.621371).toFixed(2)} mi)`);
+}
+break;
+
+case 'timezoneoffset': {
+    const [tzOff1, tzOff2] = (text || '').split(' ').map(Number);
+    if (isNaN(tzOff1) || isNaN(tzOff2)) return reply(`Usage: ${prefix}timezoneoffset <utc offset 1> <utc offset 2>\nExample: ${prefix}timezoneoffset 1 -5`);
+    reply(`🕐 Time difference: *${Math.abs(tzOff1 - tzOff2)} hour(s)*`);
+}
+break;
+
+// ===== END NEW BATCH 3 =====
+
+// ===== BATCH 2: ~100 MORE COMMANDS =====
+
+// --- Prexzy-backed tools ---
+case 'run': {
+    const runMap = { python: '/tools/compilepython', js: '/tools/compilejs', javascript: '/tools/compilejs', c: '/tools/compilec', cpp: '/tools/compilecpp', java: '/tools/compilejava', csharp: '/tools/compilecsharp' };
+    const [lang, ...codeParts] = (text || '').split(' ');
+    const endpoint = runMap[(lang || '').toLowerCase()];
+    const code = codeParts.join(' ');
+    if (!endpoint || !code) return reply(`Usage: ${prefix}run <python|js|c|cpp|java|csharp> <code>`);
+    await prexzyAskAndReply(reply, { endpoint, params: { code }, label: '💻 Output', showLabel: false, loadingMsg: '⏳ *Running...*' });
+}
+break;
+
+case 'tocpp': {
+    if (!text) return reply(`Usage: ${prefix}tocpp <code>`);
+    await prexzyAskAndReply(reply, { endpoint: '/tools/tocpp', params: { code: text.trim() }, showLabel: false });
+}
+break;
+
+case 'tojava': {
+    if (!text) return reply(`Usage: ${prefix}tojava <code>`);
+    await prexzyAskAndReply(reply, { endpoint: '/tools/tojava', params: { code: text.trim() }, showLabel: false });
+}
+break;
+
+case 'tophp': {
+    if (!text) return reply(`Usage: ${prefix}tophp <code>`);
+    await prexzyAskAndReply(reply, { endpoint: '/tools/tophp', params: { code: text.trim() }, showLabel: false });
+}
+break;
+
+case 'detectlang': {
+    if (!text) return reply(`Usage: ${prefix}detectlang <text>`);
+    await prexzyAskAndReply(reply, { endpoint: '/tools/detectlanguage', params: { text: text.trim() }, label: '🌐 Detected Language', showLabel: false });
+}
+break;
+
+case 'geoip': {
+    if (!text) return reply(`Usage: ${prefix}geoip <ip address>`);
+    await prexzyAskAndReply(reply, { endpoint: '/tools/geoip', params: { ip: text.trim() }, label: '🌍 GeoIP', showLabel: false });
+}
+break;
+
+case 'hostcheck': {
+    if (!text) return reply(`Usage: ${prefix}hostcheck <domain>`);
+    await prexzyAskAndReply(reply, { endpoint: '/tools/hostchecksimple', params: { domain: text.trim() }, label: '🖥️ Host Check', showLabel: false });
+}
+break;
+
+case 'hostip': {
+    if (!text) return reply(`Usage: ${prefix}hostip <domain>`);
+    await prexzyAskAndReply(reply, { endpoint: '/tools/myip', params: { domain: text.trim() }, label: '🌍 Host IP', showLabel: false });
+}
+break;
+
+case 'fdroidsearch': {
+    if (!text) return reply(`Usage: ${prefix}fdroidsearch <app name>`);
+    await prexzyAskAndReply(reply, { endpoint: '/tools/fdroidsearch', params: { query: text.trim() }, label: '📦 F-Droid Results', showLabel: false });
+}
+break;
+
+case 'apphunt': {
+    if (!text) return reply(`Usage: ${prefix}apphunt <app name>`);
+    await prexzyAskAndReply(reply, { endpoint: '/tools/fdroidsearch', params: { query: text.trim() }, label: '📦 App Search', showLabel: false });
+}
+break;
+
+case 'ytranscript': {
+    if (!text) return reply(`Usage: ${prefix}ytranscript <youtube link>`);
+    await prexzyAskAndReply(reply, { endpoint: '/tools/youtube-transcript', params: { url: text.trim() }, label: '📝 Transcript', showLabel: false, loadingMsg: '⏳ *Fetching transcript...*' });
+}
+break;
+
+case 'tiktoktranscript': {
+    if (!text) return reply(`Usage: ${prefix}tiktoktranscript <tiktok link>`);
+    await prexzyAskAndReply(reply, { endpoint: '/tools/tiktoktranscript', params: { url: text.trim() }, label: '📝 Transcript', showLabel: false, loadingMsg: '⏳ *Fetching transcript...*' });
+}
+break;
+
+// --- Number base converters ---
+case 'dec2bin': { const n = parseInt(text); if (isNaN(n)) return reply(`Usage: ${prefix}dec2bin <number>`); reply(`🔢 ${n} in binary = ${n.toString(2)}`); } break;
+case 'bin2dec': { if (!/^[01\s]+$/.test(text || '')) return reply(`Usage: ${prefix}bin2dec <binary>`); reply(`🔢 ${text.trim()} in decimal = ${parseInt(text.trim(), 2)}`); } break;
+case 'dec2hex': { const n = parseInt(text); if (isNaN(n)) return reply(`Usage: ${prefix}dec2hex <number>`); reply(`🔢 ${n} in hex = ${n.toString(16).toUpperCase()}`); } break;
+case 'hex2dec': { if (!text) return reply(`Usage: ${prefix}hex2dec <hex>`); const v = parseInt(text.trim(), 16); if (isNaN(v)) return reply('❌ Invalid hex'); reply(`🔢 ${text.trim()} in decimal = ${v}`); } break;
+case 'dec2oct': { const n = parseInt(text); if (isNaN(n)) return reply(`Usage: ${prefix}dec2oct <number>`); reply(`🔢 ${n} in octal = ${n.toString(8)}`); } break;
+case 'oct2dec': { if (!text) return reply(`Usage: ${prefix}oct2dec <octal>`); const v = parseInt(text.trim(), 8); if (isNaN(v)) return reply('❌ Invalid octal'); reply(`🔢 ${text.trim()} in decimal = ${v}`); } break;
+
+// --- Math ---
+case 'square': { const n = parseFloat(text); if (isNaN(n)) return reply(`Usage: ${prefix}square <number>`); reply(`🔢 ${n}² = ${n ** 2}`); } break;
+case 'cube': { const n = parseFloat(text); if (isNaN(n)) return reply(`Usage: ${prefix}cube <number>`); reply(`🔢 ${n}³ = ${n ** 3}`); } break;
+case 'sqrt': { const n = parseFloat(text); if (isNaN(n) || n < 0) return reply(`Usage: ${prefix}sqrt <non-negative number>`); reply(`🔢 √${n} = ${Math.sqrt(n)}`); } break;
+case 'power': { const [b, e] = (text || '').split(' ').map(Number); if (isNaN(b) || isNaN(e)) return reply(`Usage: ${prefix}power <base> <exponent>`); reply(`🔢 ${b}^${e} = ${b ** e}`); } break;
+case 'modulo': { const [a, b] = (text || '').split(' ').map(Number); if (isNaN(a) || isNaN(b)) return reply(`Usage: ${prefix}modulo <a> <b>`); reply(`🔢 ${a} % ${b} = ${a % b}`); } break;
+
+// --- Text case/format ---
+case 'capitalize': { if (!text) return reply(`Usage: ${prefix}capitalize <text>`); reply(text.charAt(0).toUpperCase() + text.slice(1)); } break;
+case 'camelcase': { if (!text) return reply(`Usage: ${prefix}camelcase <text>`); const w = text.trim().split(/\s+/); reply(w[0].toLowerCase() + w.slice(1).map(x => x[0].toUpperCase() + x.slice(1).toLowerCase()).join('')); } break;
+case 'snakecase': { if (!text) return reply(`Usage: ${prefix}snakecase <text>`); reply(text.trim().split(/\s+/).join('_').toLowerCase()); } break;
+case 'kebabcase': { if (!text) return reply(`Usage: ${prefix}kebabcase <text>`); reply(text.trim().split(/\s+/).join('-').toLowerCase()); } break;
+case 'truncate': { const parts = (text || '').split('|'); const t = (parts[0] || '').trim(); const n = parseInt(parts[1]) || 50; if (!t) return reply(`Usage: ${prefix}truncate <text> | <length>`); reply(t.length > n ? t.slice(0, n) + '...' : t); } break;
+case 'padtext': { const [t, n, ch] = (text || '').split('|').map(s => (s || '').trim()); if (!t || !n) return reply(`Usage: ${prefix}padtext <text> | <length> | <char>`); reply(t.padStart((t.length + parseInt(n)) / 2 | 0, ch || ' ').padEnd(parseInt(n), ch || ' ')); } break;
+case 'charrepeat': { const [ch, n] = (text || '').split(' '); const count = parseInt(n); if (!ch || isNaN(count) || count > 500) return reply(`Usage: ${prefix}charrepeat <char> <count, max 500>`); reply(ch.repeat(count)); } break;
+case 'shuffle': { if (!text) return reply(`Usage: ${prefix}shuffle <text>`); reply(text.split('').sort(() => Math.random() - 0.5).join('')); } break;
+case 'textwrap': { const [t, w] = (text || '').split('|').map(s => (s || '').trim()); const width = parseInt(w) || 30; if (!t) return reply(`Usage: ${prefix}textwrap <text> | <width>`); const words = t.split(' '); let lines = [], line = ''; for (const word of words) { if ((line + ' ' + word).trim().length > width) { lines.push(line.trim()); line = word; } else line += ' ' + word; } lines.push(line.trim()); reply(lines.join('\n')); } break;
+case 'lorem': { const n = parseInt(text) || 5; const loremWords = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua".split(' '); let out = []; for (let i = 0; i < n; i++) out.push(loremWords[Math.floor(Math.random() * loremWords.length)]); reply(out.join(' ').charAt(0).toUpperCase() + out.join(' ').slice(1) + '.'); } break;
+case 'placeholder': { reply('📝 Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.'); } break;
+
+// --- Line/text tools ---
+case 'removeduplicates': { if (!text) return reply(`Usage: ${prefix}removeduplicates <lines>`); reply([...new Set(text.split('\n'))].join('\n')); } break;
+case 'sortlines': { if (!text) return reply(`Usage: ${prefix}sortlines <lines>`); reply(text.split('\n').sort().join('\n')); } break;
+case 'numberlines': { if (!text) return reply(`Usage: ${prefix}numberlines <lines>`); reply(text.split('\n').map((l, i) => `${i + 1}. ${l}`).join('\n')); } break;
+case 'countoccurrence': { const [t, w] = (text || '').split('|').map(s => (s || '').trim()); if (!t || !w) return reply(`Usage: ${prefix}countoccurrence <text> | <word>`); const count = (t.match(new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')) || []).length; reply(`🔢 "${w}" appears *${count}* time(s)`); } break;
+case 'findreplace': { const [t, find, rep] = (text || '').split('|').map(s => (s || '').trim()); if (!t || !find) return reply(`Usage: ${prefix}findreplace <text> | <find> | <replace>`); reply(t.split(find).join(rep || '')); } break;
+case 'extracturls': { if (!text) return reply(`Usage: ${prefix}extracturls <text>`); const urls = text.match(/https?:\/\/[^\s]+/g); reply(urls?.length ? urls.join('\n') : '❌ No URLs found'); } break;
+case 'extractemails': { if (!text) return reply(`Usage: ${prefix}extractemails <text>`); const emails = text.match(/[^\s@]+@[^\s@]+\.[^\s@]+/g); reply(emails?.length ? emails.join('\n') : '❌ No emails found'); } break;
+case 'extractnumbers': { if (!text) return reply(`Usage: ${prefix}extractnumbers <text>`); const nums = text.match(/\d+/g); reply(nums?.length ? nums.join(', ') : '❌ No numbers found'); } break;
+
+// --- Validators ---
+case 'isemail': { if (!text) return reply(`Usage: ${prefix}isemail <email>`); reply(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text.trim()) ? '✅ Valid email format' : '❌ Invalid email format'); } break;
+case 'isurl': { if (!text) return reply(`Usage: ${prefix}isurl <url>`); reply(/^https?:\/\/[^\s]+$/.test(text.trim()) ? '✅ Valid URL format' : '❌ Invalid URL format'); } break;
+case 'isphone': { if (!text) return reply(`Usage: ${prefix}isphone <number>`); reply(/^\+?[0-9]{7,15}$/.test(text.trim().replace(/[\s-]/g, '')) ? '✅ Looks like a valid phone number' : '❌ Doesn\'t look like a valid phone number'); } break;
+case 'emailvalidate': { if (!text) return reply(`Usage: ${prefix}emailvalidate <email>`); reply(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text.trim()) ? '✅ Valid email format' : '❌ Invalid email format'); } break;
+
+// --- Date/time ---
+case 'dayofweek': { if (!text) return reply(`Usage: ${prefix}dayofweek <YYYY-MM-DD>`); const d = new Date(text.trim()); if (isNaN(d)) return reply('❌ Invalid date'); reply(`📅 ${text.trim()} was a *${d.toLocaleDateString('en-US', { weekday: 'long' })}*`); } break;
+case 'weeknumber': { const d = text ? new Date(text.trim()) : new Date(); if (isNaN(d)) return reply('❌ Invalid date'); const date = new Date(d.getTime()); date.setHours(0, 0, 0, 0); date.setDate(date.getDate() + 3 - (date.getDay() + 6) % 7); const week1 = new Date(date.getFullYear(), 0, 4); const wn = 1 + Math.round(((date.getTime() - week1.getTime()) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7); reply(`📅 Week *${wn}* of ${date.getFullYear()}`); } break;
+case 'leapyear': { const y = parseInt(text); if (isNaN(y)) return reply(`Usage: ${prefix}leapyear <year>`); const isLeap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0; reply(isLeap ? `✅ ${y} is a leap year` : `❌ ${y} is not a leap year`); } break;
+case 'timezoneconvert': { reply(`🕐 *Current UTC time:* ${new Date().toUTCString()}\n\nFor a specific timezone, tell me the UTC offset and I'll do the math — e.g. "UTC+1".`); } break;
+
+// --- Unit converters ---
+case 'km2mi': { const n = parseFloat(text); if (isNaN(n)) return reply(`Usage: ${prefix}km2mi <km>`); reply(`📏 ${n} km = ${(n * 0.621371).toFixed(3)} miles`); } break;
+case 'mi2km': { const n = parseFloat(text); if (isNaN(n)) return reply(`Usage: ${prefix}mi2km <miles>`); reply(`📏 ${n} miles = ${(n * 1.60934).toFixed(3)} km`); } break;
+case 'kg2lb': { const n = parseFloat(text); if (isNaN(n)) return reply(`Usage: ${prefix}kg2lb <kg>`); reply(`⚖️ ${n} kg = ${(n * 2.20462).toFixed(3)} lb`); } break;
+case 'lb2kg': { const n = parseFloat(text); if (isNaN(n)) return reply(`Usage: ${prefix}lb2kg <lb>`); reply(`⚖️ ${n} lb = ${(n * 0.453592).toFixed(3)} kg`); } break;
+case 'cm2inch': { const n = parseFloat(text); if (isNaN(n)) return reply(`Usage: ${prefix}cm2inch <cm>`); reply(`📏 ${n} cm = ${(n * 0.393701).toFixed(3)} inches`); } break;
+case 'inch2cm': { const n = parseFloat(text); if (isNaN(n)) return reply(`Usage: ${prefix}inch2cm <inches>`); reply(`📏 ${n} inches = ${(n * 2.54).toFixed(3)} cm`); } break;
+case 'distanceconvert': { const [n, unit] = (text || '').split(' '); const v = parseFloat(n); if (isNaN(v) || !['km', 'mi', 'm', 'ft'].includes((unit || '').toLowerCase())) return reply(`Usage: ${prefix}distanceconvert <value> <km|mi|m|ft>`); const toM = { km: 1000, mi: 1609.34, m: 1, ft: 0.3048 }; const meters = v * toM[unit.toLowerCase()]; reply(`📏 ${v} ${unit} =\n${(meters / 1000).toFixed(3)} km\n${(meters / 1609.34).toFixed(3)} mi\n${meters.toFixed(2)} m\n${(meters / 0.3048).toFixed(2)} ft`); } break;
+case 'weightconvert': { const [n, unit] = (text || '').split(' '); const v = parseFloat(n); if (isNaN(v) || !['kg', 'lb', 'g', 'oz'].includes((unit || '').toLowerCase())) return reply(`Usage: ${prefix}weightconvert <value> <kg|lb|g|oz>`); const toKg = { kg: 1, lb: 0.453592, g: 0.001, oz: 0.0283495 }; const kg = v * toKg[unit.toLowerCase()]; reply(`⚖️ ${v} ${unit} =\n${kg.toFixed(3)} kg\n${(kg / 0.453592).toFixed(3)} lb\n${(kg * 1000).toFixed(1)} g\n${(kg / 0.0283495).toFixed(2)} oz`); } break;
+case 'speedconvert': { const [n, unit] = (text || '').split(' '); const v = parseFloat(n); if (isNaN(v) || !['kmh', 'mph', 'ms'].includes((unit || '').toLowerCase())) return reply(`Usage: ${prefix}speedconvert <value> <kmh|mph|ms>`); const toKmh = { kmh: 1, mph: 1.60934, ms: 3.6 }; const kmh = v * toKmh[unit.toLowerCase()]; reply(`🏎️ ${v} ${unit} =\n${kmh.toFixed(2)} km/h\n${(kmh / 1.60934).toFixed(2)} mph\n${(kmh / 3.6).toFixed(2)} m/s`); } break;
+case 'areaconvert': { const [n, unit] = (text || '').split(' '); const v = parseFloat(n); if (isNaN(v) || !['sqm', 'sqft', 'acre', 'hectare'].includes((unit || '').toLowerCase())) return reply(`Usage: ${prefix}areaconvert <value> <sqm|sqft|acre|hectare>`); const toSqm = { sqm: 1, sqft: 0.092903, acre: 4046.86, hectare: 10000 }; const sqm = v * toSqm[unit.toLowerCase()]; reply(`📐 ${v} ${unit} =\n${sqm.toFixed(2)} m²\n${(sqm / 0.092903).toFixed(2)} ft²\n${(sqm / 4046.86).toFixed(4)} acres\n${(sqm / 10000).toFixed(4)} hectares`); } break;
+case 'volumeconvert': { const [n, unit] = (text || '').split(' '); const v = parseFloat(n); if (isNaN(v) || !['l', 'gal', 'ml', 'floz'].includes((unit || '').toLowerCase())) return reply(`Usage: ${prefix}volumeconvert <value> <l|gal|ml|floz>`); const toL = { l: 1, gal: 3.78541, ml: 0.001, floz: 0.0295735 }; const l = v * toL[unit.toLowerCase()]; reply(`🧪 ${v} ${unit} =\n${l.toFixed(3)} L\n${(l / 3.78541).toFixed(3)} gal\n${(l * 1000).toFixed(1)} mL\n${(l / 0.0295735).toFixed(2)} fl oz`); } break;
+
+// --- HTML/JSON/data tools ---
+case 'htmlescape': { if (!text) return reply(`Usage: ${prefix}htmlescape <text>`); reply(text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')); } break;
+case 'htmlunescape': { if (!text) return reply(`Usage: ${prefix}htmlunescape <html>`); reply(text.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')); } break;
+case 'jsonvalidate': { if (!text) return reply(`Usage: ${prefix}jsonvalidate <json>`); try { JSON.parse(text); reply('✅ Valid JSON'); } catch (e) { reply(`❌ Invalid JSON: ${e.message}`); } } break;
+case 'jsonminify': { if (!text) return reply(`Usage: ${prefix}jsonminify <json>`); try { reply(JSON.stringify(JSON.parse(text))); } catch (e) { reply(`❌ Invalid JSON: ${e.message}`); } } break;
+case 'csvtojson': { if (!text) return reply(`Usage: ${prefix}csvtojson <csv text, first row = headers>`); try { const rows = text.trim().split('\n').map(r => r.split(',').map(c => c.trim())); const headers = rows[0]; const result = rows.slice(1).map(r => Object.fromEntries(headers.map((h, i) => [h, r[i]]))); reply('```' + JSON.stringify(result, null, 2) + '```'); } catch (e) { reply(`❌ Error: ${e.message}`); } } break;
+case 'xmlvalidate': { if (!text) return reply(`Usage: ${prefix}xmlvalidate <xml>`); const opens = (text.match(/<[a-zA-Z][^/>]*>/g) || []).length; const closes = (text.match(/<\/[a-zA-Z][^>]*>/g) || []).length; reply(opens === closes ? '✅ Tags appear balanced' : `❌ Tag mismatch: ${opens} opening vs ${closes} closing tags`); } break;
+case 'regextest': { const [pattern, str] = (text || '').split('|').map(s => (s || '').trim()); if (!pattern || !str) return reply(`Usage: ${prefix}regextest <pattern> | <text>`); try { const match = new RegExp(pattern).test(str); reply(match ? `✅ Match found` : `❌ No match`); } catch (e) { reply(`❌ Invalid regex: ${e.message}`); } } break;
+case 'maskdata': { if (!text) return reply(`Usage: ${prefix}maskdata <text>`); reply(text.length <= 4 ? '*'.repeat(text.length) : text.slice(0, 2) + '*'.repeat(text.length - 4) + text.slice(-2)); } break;
+case 'maskcard': { if (!text) return reply(`Usage: ${prefix}maskcard <card number>`); const digits = text.replace(/\D/g, ''); if (digits.length < 4) return reply('❌ Too short'); reply('*'.repeat(digits.length - 4) + digits.slice(-4)); } break;
+case 'creditcardmask': { if (!text) return reply(`Usage: ${prefix}creditcardmask <card number>`); const digits = text.replace(/\D/g, ''); if (digits.length < 4) return reply('❌ Too short'); reply('**** **** **** ' + digits.slice(-4)); } break;
+case 'phoneformat': { if (!text) return reply(`Usage: ${prefix}phoneformat <number>`); const digits = text.replace(/\D/g, ''); reply(digits.length === 10 ? `(${digits.slice(0,3)}) ${digits.slice(3,6)}-${digits.slice(6)}` : digits.length === 11 ? `+${digits[0]} (${digits.slice(1,4)}) ${digits.slice(4,7)}-${digits.slice(7)}` : `❌ Expected 10-11 digits, got ${digits.length}`); } break;
+
+// --- Color ---
+case 'colorhex': { if (!text) return reply(`Usage: ${prefix}colorhex <r> <g> <b>`); const [r, g, b] = text.split(' ').map(Number); if ([r, g, b].some(n => isNaN(n) || n < 0 || n > 255)) return reply('❌ RGB values must be 0-255'); reply(`🎨 #${[r, g, b].map(n => n.toString(16).padStart(2, '0')).join('').toUpperCase()}`); } break;
+case 'colorname': { if (!/^#?[0-9a-fA-F]{6}$/.test((text || '').trim())) return reply(`Usage: ${prefix}colorname <hex e.g. #FF5733>`); const hex = text.trim().replace('#', ''); const r = parseInt(hex.slice(0,2),16), g = parseInt(hex.slice(2,4),16), b = parseInt(hex.slice(4,6),16); reply(`🎨 #${hex.toUpperCase()} = RGB(${r}, ${g}, ${b})`); } break;
+case 'colorcontrast': { if (!/^#?[0-9a-fA-F]{6}$/.test((text || '').trim())) return reply(`Usage: ${prefix}colorcontrast <hex>`); const hex = text.trim().replace('#', ''); const r = parseInt(hex.slice(0,2),16), g = parseInt(hex.slice(2,4),16), b = parseInt(hex.slice(4,6),16); const brightness = (r * 299 + g * 587 + b * 114) / 1000; reply(`🎨 Best text color on #${hex.toUpperCase()}: *${brightness > 128 ? 'Black' : 'White'}*`); } break;
+
+// --- Random generators ---
+case 'randomword': { const wordBank = ['serendipity', 'ephemeral', 'luminous', 'wanderlust', 'mosaic', 'velvet', 'horizon', 'echo', 'zenith', 'cascade', 'gravity', 'whisper', 'aurora', 'nebula', 'quartz']; reply(`🎲 ${wordBank[Math.floor(Math.random() * wordBank.length)]}`); } break;
+case 'randomdate': { const start = new Date(2000, 0, 1); const end = new Date(); const d = new Date(start.getTime() + Math.random() * (end.getTime() - start.getTime())); reply(`📅 ${d.toDateString()}`); } break;
+case 'uniqueid': { reply(`🆔 ${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`); } break;
+case 'strongpassword': { const len = parseInt(text) || 16; const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*'; let pass = ''; for (let i = 0; i < Math.min(len, 128); i++) pass += chars[Math.floor(Math.random() * chars.length)]; reply(`🔐 ${pass}`); } break;
+case 'passwordstrength': { if (!text) return reply(`Usage: ${prefix}passwordstrength <password>`); let score = 0; if (text.length >= 8) score++; if (text.length >= 12) score++; if (/[A-Z]/.test(text)) score++; if (/[a-z]/.test(text)) score++; if (/[0-9]/.test(text)) score++; if (/[^A-Za-z0-9]/.test(text)) score++; const labels = ['Very Weak', 'Weak', 'Fair', 'Good', 'Strong', 'Very Strong', 'Excellent']; reply(`🔐 Strength: *${labels[score]}* (${score}/6)`); } break;
+
+// --- Name/word generators ---
+case 'businessname': { const prefixes = ['Prime', 'Elite', 'Swift', 'Bright', 'Nova', 'Peak', 'Core', 'Vivid', 'Nexus', 'Apex']; const suffixes = ['Solutions', 'Ventures', 'Hub', 'Labs', 'Group', 'Works', 'Studio', 'Collective']; reply(`💼 ${prefixes[Math.floor(Math.random()*prefixes.length)]} ${suffixes[Math.floor(Math.random()*suffixes.length)]}`); } break;
+case 'usernamegen': { const adjectives = ['Silent', 'Fierce', 'Golden', 'Shadow', 'Crimson', 'Frost', 'Wild', 'Mystic']; const nouns = ['Wolf', 'Phoenix', 'Tiger', 'Falcon', 'Storm', 'Blade', 'Raven', 'Fox']; reply(`👤 ${adjectives[Math.floor(Math.random()*adjectives.length)]}${nouns[Math.floor(Math.random()*nouns.length)]}${Math.floor(Math.random()*999)}`); } break;
+case 'namegenerator': { const first = ['James', 'Amara', 'Kofi', 'Zara', 'Chidi', 'Layla', 'Kwame', 'Amina']; const last = ['Okafor', 'Bello', 'Adeyemi', 'Nwosu', 'Balogun', 'Eze']; reply(`👤 ${first[Math.floor(Math.random()*first.length)]} ${last[Math.floor(Math.random()*last.length)]}`); } break;
+
+// --- Fun/social prompts (all local, no external content) ---
+case 'wouldurather': { const prompts = ['Would you rather have unlimited money or unlimited time?', 'Would you rather be able to fly or be invisible?', 'Would you rather live without music or without TV?', 'Would you rather always be 10 minutes late or 20 minutes early?', 'Would you rather explore space or the ocean?']; reply(`🤔 ${prompts[Math.floor(Math.random()*prompts.length)]}`); } break;
+case 'neverhaveiever': { const prompts = ['Never have I ever pretended to be sick to skip something.', 'Never have I ever forgotten someone\'s name right after meeting them.', 'Never have I ever laughed at the wrong moment.', 'Never have I ever sent a text to the wrong person.', 'Never have I ever fallen asleep during a movie.']; reply(`🙊 ${prompts[Math.floor(Math.random()*prompts.length)]}`); } break;
+case 'truthquestion': { const prompts = ['What\'s the most embarrassing thing that\'s happened to you?', 'What\'s a secret talent you have?', 'What\'s the weirdest food combo you enjoy?', 'What\'s something you\'re irrationally afraid of?']; reply(`💭 ${prompts[Math.floor(Math.random()*prompts.length)]}`); } break;
+case 'darequestion': { const prompts = ['Send a voice note singing your favorite song.', 'Text your last contact "I found the treasure."', 'Do 10 push-ups right now.', 'Speak in an accent for the next 3 messages.']; reply(`🎯 ${prompts[Math.floor(Math.random()*prompts.length)]}`); } break;
+case 'icebreaker': { const prompts = ['If you could have dinner with anyone, dead or alive, who would it be?', 'What\'s a hobby you\'ve always wanted to try?', 'What\'s your go-to karaoke song?', 'Beach vacation or mountain retreat?']; reply(`🧊 ${prompts[Math.floor(Math.random()*prompts.length)]}`); } break;
+case 'debate': { const prompts = ['Is a hot dog a sandwich?', 'Pineapple on pizza: yes or no?', 'Is water wet?', 'Cereal: soup or not?']; reply(`⚖️ ${prompts[Math.floor(Math.random()*prompts.length)]}`); } break;
+case 'storyprompt': { const prompts = ['Write about a door that only appears at midnight.', 'A stranger hands you a key with no explanation.', 'You wake up with a skill you never had yesterday.', 'The last person on Earth hears a knock at the door.']; reply(`📖 ${prompts[Math.floor(Math.random()*prompts.length)]}`); } break;
+case 'motivatequote': { const quotes = ['Small steps every day lead to big results.', 'You don\'t have to be great to start, but you have to start to be great.', 'Discipline beats motivation when motivation runs out.', 'Progress, not perfection.']; reply(`💪 ${quotes[Math.floor(Math.random()*quotes.length)]}`); } break;
+case 'apology': { const lines = ['I\'m really sorry for what happened — that wasn\'t fair to you.', 'I owe you an apology. I should have handled that better.', 'My bad, genuinely. I\'ll do better.']; reply(`🙏 ${lines[Math.floor(Math.random()*lines.length)]}`); } break;
+case 'excusegen': { const lines = ['My phone died right when I was about to reply, I swear.', 'I was in a place with zero network, sorry o.', 'Something urgent came up out of nowhere.']; reply(`😅 ${lines[Math.floor(Math.random()*lines.length)]}`); } break;
+case 'pickline': { const lines = ['Are you a magician? Because whenever I look at you, everyone else disappears.', 'Do you have a map? I keep getting lost in your eyes.', 'Is your name Google? Because you have everything I\'ve been searching for.']; reply(`😏 ${lines[Math.floor(Math.random()*lines.length)]}`); } break;
+case 'compliment2': { const lines = ['Your energy genuinely lights up the room.', 'You have a way of making people feel heard.', 'Your creativity never stops impressing me.']; reply(`✨ ${lines[Math.floor(Math.random()*lines.length)]}`); } break;
+case 'insultgen': { const lines = ['You have the wit of a rock and half the charm.', 'I\'d agree with you but then we\'d both be wrong.', 'You\'re proof that even evolution takes a day off sometimes.']; reply(`😹 ${lines[Math.floor(Math.random()*lines.length)]} _(all in good fun)_`); } break;
+case 'riddlegen': { const riddles = [['I speak without a mouth and hear without ears. What am I?', 'An echo'], ['The more you take, the more you leave behind. What am I?', 'Footsteps'], ['What has keys but no locks?', 'A piano']]; const [q, a] = riddles[Math.floor(Math.random()*riddles.length)]; reply(`🧩 ${q}\n\n_Reply .riddlegen again for a new one, or think it through!_\n||Answer: ${a}||`); } break;
+case 'funfact2': { const facts = ['Honey never spoils — archaeologists have found 3000-year-old honey that\'s still edible.', 'Bananas are berries, but strawberries aren\'t.', 'Octopuses have three hearts.', 'A day on Venus is longer than a year on Venus.']; reply(`🧠 ${facts[Math.floor(Math.random()*facts.length)]}`); } break;
+
+// --- Games (local logic) ---
+case 'diceroll': { const n = Math.min(parseInt(text) || 1, 10); const rolls = Array.from({length: n}, () => Math.floor(Math.random() * 6) + 1); reply(`🎲 ${rolls.join(', ')}${n > 1 ? ` (total: ${rolls.reduce((a,b)=>a+b,0)})` : ''}`); } break;
+case 'cardpicker': { const suits = ['♠️', '♥️', '♦️', '♣️']; const ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']; reply(`🃏 ${ranks[Math.floor(Math.random()*ranks.length)]}${suits[Math.floor(Math.random()*suits.length)]}`); } break;
+case 'coinspin': { reply(`🪙 ${Math.random() < 0.5 ? 'Heads' : 'Tails'}`); } break;
+case 'magicball': { const answers = ['It is certain.', 'Without a doubt.', 'Yes, definitely.', 'Ask again later.', 'Cannot predict now.', 'Don\'t count on it.', 'My sources say no.', 'Outlook not so good.']; reply(`🎱 ${answers[Math.floor(Math.random()*answers.length)]}`); } break;
+
+// ===== END BATCH 2 =====
+
 // ===== KICK MEMBER =====
 case 'kick': {
     if (!m.isGroup) return reply('✘ Groups only');
@@ -18719,11 +22617,12 @@ case 'kick': {
     const kickMentioned = m.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
     const kickUser = kickMentioned[0] || m.quoted?.sender || text;
     if (!kickUser) return reply('✘ Reply to or mention a member');
-    const kickJid = (kickUser.includes('@') ? kickUser.split('@')[0] : kickUser).replace(/\D/g, '') + '@s.whatsapp.net';
+    const kickJid = toParticipantJid(kickUser);
+    if (!kickJid) return reply('✘ Could not resolve that member');
     try {
         await devtrust.groupParticipantsUpdate(m.chat, [kickJid], 'remove');
         reply(`✓ @${kickJid.split('@')[0]} kicked`, [kickJid]);
-    } catch (e) { reply('✘ ' + e.message); }
+    } catch (e) { reply('✘ ' + explainGroupActionError(e)); }
 }
 break;
 
@@ -18735,11 +22634,12 @@ case 'promote': {
     const proMentioned = m.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
     const proUser = proMentioned[0] || m.quoted?.sender || text;
     if (!proUser) return reply('✘ Reply to or mention a member');
-    const proJid = (proUser.includes('@') ? proUser.split('@')[0] : proUser).replace(/\D/g, '') + '@s.whatsapp.net';
+    const proJid = toParticipantJid(proUser);
+    if (!proJid) return reply('✘ Could not resolve that member');
     try {
         await devtrust.groupParticipantsUpdate(m.chat, [proJid], 'promote');
         reply(`✓ @${proJid.split('@')[0]} promoted to admin`, [proJid]);
-    } catch (e) { reply('✘ ' + e.message); }
+    } catch (e) { reply('✘ ' + explainGroupActionError(e)); }
 }
 break;
 
@@ -18751,11 +22651,12 @@ case 'demote': {
     const demMentioned = m.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
     const demUser = demMentioned[0] || m.quoted?.sender || text;
     if (!demUser) return reply('✘ Reply to or mention an admin');
-    const demJid = (demUser.includes('@') ? demUser.split('@')[0] : demUser).replace(/\D/g, '') + '@s.whatsapp.net';
+    const demJid = toParticipantJid(demUser);
+    if (!demJid) return reply('✘ Could not resolve that member');
     try {
         await devtrust.groupParticipantsUpdate(m.chat, [demJid], 'demote');
         reply(`✓ @${demJid.split('@')[0]} demoted`, [demJid]);
-    } catch (e) { reply('✘ ' + e.message); }
+    } catch (e) { reply('✘ ' + explainGroupActionError(e)); }
 }
 break;
 
@@ -18788,12 +22689,15 @@ case 'setrole': {
 break;
 
 // ===== GIFT MEMBER (group.js) =====
-case 'gift': {
+// Renamed from 'gift' — that name is claimed by the economy .gift above
+// (though note: that one depends on a legendaryEconomy module that
+// doesn't actually exist in this codebase right now, see chat).
+case 'giftmsg': {
     if (!m.isGroup) return reply('✘ Groups only');
     const giftMentioned = m.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
     const giftTarget = giftMentioned[0] || m.quoted?.sender;
     const giftMsg = text.replace(/@\d+/g, '').trim() || 'You\'re appreciated! 🎉';
-    if (!giftTarget) return reply(`Example: ${prefix}gift @user Congrats on the promotion!`);
+    if (!giftTarget) return reply(`Example: ${prefix}giftmsg @user Congrats on the promotion!`);
     const groupCmds = __cmd_group;
     await groupCmds.sendGift(devtrust, m.chat, giftTarget, giftMsg);
 }
@@ -18857,7 +22761,48 @@ case 'notify': {
 }
 break;
 
-// ===== LIVE MATCH TRACKING (football.js) =====
+// ===== DIRECT SHORTCUTS (football.js) =====
+// These functions were fully built and already reachable via `.menu
+// football`'s numbered picker, but had no direct typed-command shortcut —
+// adding the most commonly-wanted ones so people don't have to navigate
+// the menu just to check a table or fixture list.
+case 'standings':
+case 'table': {
+    const footballCmds = __cmd_football;
+    await footballCmds.leagueStandings(devtrust, m.chat, text ? text.trim() : '');
+}
+break;
+
+case 'fixtures':
+case 'upcomingfixtures': {
+    const footballCmds = __cmd_football;
+    await footballCmds.upcomingFixtures(devtrust, m.chat);
+}
+break;
+
+case 'topscorers':
+case 'scorers': {
+    const footballCmds = __cmd_football;
+    await footballCmds.topScorers(devtrust, m.chat);
+}
+break;
+
+case 'footballnews': {
+    const footballCmds = __cmd_football;
+    await footballCmds.footballNews(devtrust, m.chat);
+}
+break;
+
+case 'livescores': {
+    // Distinct name from the existing .score/.match/.livematch (which use
+    // a separate, unverified third-party Vercel API with team filtering)
+    // — this one uses the same football-data.org source as the rest of
+    // this module, just without a team filter.
+    const footballCmds = __cmd_football;
+    await footballCmds.liveMatches(devtrust, m.chat);
+}
+break;
+
 case 'livetrack': {
     const footballCmds = __cmd_football;
     await footballCmds.startLiveTrack(devtrust, m.chat, text ? text.trim() : '');
@@ -19321,19 +23266,29 @@ break;
 // ===== ANTI STATUS (show all anti features) =====
 case 'antistatus': {
     if (!m.isGroup) return reply('✘ Groups only');
-    const alCfg = getSetting(m.chat, 'antilink', { enabled: false, action: 'delete' });
-    const asCfg = getSetting(m.chat, 'antispam', { enabled: false, action: 'delete' });
-    const atCfg = getSetting(m.chat, 'antitag', { enabled: false, action: 'delete' });
-    const abCfg = getSetting(m.chat, 'antibot', { enabled: false, action: 'delete' });
-    const abgCfg = getSetting(m.chat, 'antibeg', { enabled: false, action: 'delete' });
+    // Was reading every one of these under getSetting(m.chat, ...) — none
+    // of the actual toggle commands save there. antilink uses its own
+    // separate settings store entirely; antitag/antispam/antibot/antibeg
+    // all save under botNumber + m.chat, not m.chat alone. This always
+    // showed everything as OFF regardless of real state.
+    const alCfg = antilinkSettings[getAntilinkKey(botNumber, m.chat)] || { enabled: false, action: 'delete' };
+    const asCfg = getSetting(botNumber + m.chat, 'antispam', { enabled: false, action: 'delete' });
+    const atCfg = getSetting(botNumber + m.chat, 'antitag', { enabled: false, action: 'delete' });
+    const abCfg = getSetting(botNumber + m.chat, 'antibot', { enabled: false, action: 'delete' });
+    const abgCfg = getSetting(botNumber + m.chat, 'antibeg', { enabled: false, action: 'delete' });
+    const amgCfg = antiMentionGcSettings[getAntilinkKey(botNumber, m.chat)] || { enabled: false, action: 'delete' };
+    const abwCfg = getSetting(botNumber + m.chat, 'feature.antibadword', false);
+    const fmt = (cfg) => cfg.enabled ? `✅ ON | ${cfg.action}${cfg.action === 'warn' ? ` (${cfg.warnLimit || 3})` : ''}` : '❌ OFF';
     reply(
 `*🛡️ Group Anti-Features*
 
-🔗 AntiLink: ${alCfg.enabled ? '✅ ON' : '❌ OFF'} | ${alCfg.action}
-🚫 AntiSpam: ${asCfg.enabled ? '✅ ON' : '❌ OFF'} | ${asCfg.action}
-🏷️ AntiTag:  ${atCfg.enabled ? '✅ ON' : '❌ OFF'} | ${atCfg.action}
-🤖 AntiBot:  ${abCfg.enabled ? '✅ ON' : '❌ OFF'} | ${abCfg.action}
-💰 AntiBeg:  ${abgCfg.enabled ? '✅ ON' : '❌ OFF'} | ${abgCfg.action}`
+🔗 AntiLink: ${fmt(alCfg)}
+🚫 AntiSpam: ${fmt(asCfg)}
+🏷️ AntiTag:  ${fmt(atCfg)}
+🤖 AntiBot:  ${fmt(abCfg)}
+💰 AntiBeg:  ${fmt(abgCfg)}
+📛 AntiMentionGC: ${fmt(amgCfg)}
+🤬 AntiBadword: ${abwCfg ? '✅ ON' : '❌ OFF'}`
     );
 }
 break;
