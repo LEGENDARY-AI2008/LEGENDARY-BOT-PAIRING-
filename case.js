@@ -12680,8 +12680,13 @@ case "update": {
     // approach, but pointed at a public GitHub repo's raw file content
     // instead of the dead legendarybot.dpdns.org server. No git needed
     // on the panel at all, just plain HTTPS GETs.
-    const GITHUB_OWNER = process.env.GITHUB_OWNER;
-    const GITHUB_REPO = process.env.GITHUB_REPO;
+    //
+    // Hardcoded as defaults (not a secret, same for every paired
+    // instance) so .update works out of the box without needing
+    // config.env edited per instance. Still overridable via env vars
+    // if a specific instance ever needs to point elsewhere.
+    const GITHUB_OWNER = process.env.GITHUB_OWNER || 'LEGENDARY-AI2008';
+    const GITHUB_REPO = process.env.GITHUB_REPO || 'LEGENDARY-BOT-PAIRING-';
     const GITHUB_BRANCH = process.env.GITHUB_BRANCH || 'main';
     const filesToUpdate = ["case.js"]; // only case.js, per instruction
 
