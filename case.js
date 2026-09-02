@@ -444,6 +444,25 @@ function madrinExtractTitle(data, fallback = 'File') {
         || data?.data?.title || data?.result?.title || fallback;
 }
 
+// Pulls the first usable result out of Prexzy's /search/youtube response.
+// Shape isn't confirmed live, so this tries several plausible layouts
+// (array at root, .result, .results, .data) and several plausible field
+// names per item before giving up.
+function prexzyExtractYtSearchResult(data) {
+    const list = data?.result || data?.results || data?.data || data?.videos
+        || (Array.isArray(data) ? data : null);
+    const first = Array.isArray(list) ? list[0] : (data?.video || null);
+    if (!first) return null;
+    const videoId = first.videoId || first.id || first.video_id || null;
+    const url = first.url || first.link || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : null);
+    if (!url) return null;
+    return {
+        url,
+        title: first.title || first.name || 'Unknown',
+        author: first.author?.name || first.author || first.channel || first.uploader || 'Unknown'
+    };
+}
+
 // ============ PARTICIPANT JID NORMALIZER ============
 // kick/add/promote/demote were all rebuilding the target jid by stripping
 // non-digits and hard-appending '@s.whatsapp.net'. That's wrong for any
@@ -16932,19 +16951,41 @@ case "play": {
     try {
         reply('⏳ *Searching for music...*');
 
-        // Search YouTube for the song
-        const yts = require('yt-search');
-        const ytResults = await yts(text);
-        if (!ytResults.videos.length) return reply('❌ *No results found*');
+        // yt-search scrapes YouTube's search page directly — same
+        // bot-detection exposure the download step used to have before
+        // it moved to Prexzy. This was very likely the actual source of
+        // the 403s reported after the download step got fixed: the
+        // *search* was still hitting YouTube directly. Try Prexzy's own
+        // /search/youtube first; only fall back to yt-search if that
+        // doesn't work.
+        let trackName, artistName, ytUrl;
+        try {
+            const searchData = await prexzyGet('/search/youtube', { q: text });
+            const found = prexzyExtractYtSearchResult(searchData);
+            if (found) {
+                trackName = found.title;
+                artistName = found.author;
+                ytUrl = found.url;
+            }
+        } catch (searchErr) {
+            console.log(chalk.yellow(`⚠️ Prexzy YouTube search failed, falling back to yt-search: ${searchErr.message}`));
+        }
 
-        const vid = ytResults.videos[0];
-        const trackName = vid.title;
-        const artistName = vid.author.name;
-        const duration = vid.seconds;
+        if (!ytUrl) {
+            try {
+                const yts = require('yt-search');
+                const ytResults = await yts(text);
+                if (!ytResults.videos.length) return reply('❌ *No results found*');
+                const vid = ytResults.videos[0];
+                trackName = vid.title;
+                artistName = vid.author.name;
+                ytUrl = `https://www.youtube.com/watch?v=${vid.videoId}`;
+            } catch (fallbackErr) {
+                return reply(`❌ *Search failed* via both Prexzy and a direct YouTube search.\n\n${fallbackErr.message}`);
+            }
+        }
 
         reply(`🎵 *Found:* ${trackName}\n👤 *${artistName}*\n⏳ *Downloading...*`);
-
-        const ytUrl = `https://www.youtube.com/watch?v=${vid.videoId}`;
 
         // play-dl / yt-dlp both scrape YouTube directly from this host,
         // which is exactly what trips YouTube's bot-detection wall
