@@ -16643,6 +16643,75 @@ case 'readpage': {
 }
 break;
 
+case "sra": {
+    if (!args[0]) return reply(`Usage: ${prefix}sra <url>\n\nScrapes a page's raw HTML and reports every link/asset on it — internal links, external domains, and anything that looks like an API endpoint — plus where each one actually points.`);
+    let sraUrl = args[0];
+    if (!/^https?:\/\//.test(sraUrl)) sraUrl = 'https://' + sraUrl;
+    try {
+        await reply('🕵️ *Scanning site structure...*');
+        // Raw HTML fetch, not the r.jina.ai reader .scrape uses — that
+        // returns rendered *text*, which loses the actual href/src
+        // attributes we need to build the link map below.
+        const { data: html } = await axios.get(sraUrl, {
+            timeout: 30000,
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+        });
+        if (typeof html !== 'string') {
+            return reply('❌ *This URL returned non-HTML (likely JSON)* — it may itself be a raw API endpoint rather than a page to scrape.');
+        }
+
+        const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+        const descMatch = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i);
+
+        // Pull every href/src/action attribute value out of the raw HTML —
+        // covers <a>, <script>, <link>, <img>, <form>, etc. in one pass.
+        const rawLinks = new Set();
+        const attrRegex = /(?:href|src|action)=["']([^"'#][^"']*)["']/gi;
+        let match;
+        while ((match = attrRegex.exec(html)) !== null) rawLinks.add(match[1]);
+
+        const base = new URL(sraUrl);
+        const resolved = [];
+        for (const link of rawLinks) {
+            try { resolved.push(new URL(link, base).href); } catch (_) {}
+        }
+
+        const sameDomain = resolved.filter(u => { try { return new URL(u).hostname === base.hostname; } catch (_) { return false; } });
+        const external = resolved.filter(u => !sameDomain.includes(u));
+        const externalDomains = [...new Set(external.map(u => { try { return new URL(u).hostname; } catch (_) { return null; } }).filter(Boolean))];
+        const apiLike = resolved.filter(u => /\/api\/|\.json(\?|$)|\/v[0-9]+\//i.test(u));
+
+        let summary = `🕵️ *Site Scan:* ${sraUrl}\n\n`;
+        summary += `📌 *Title:* ${titleMatch ? titleMatch[1].trim() : '(none found)'}\n`;
+        if (descMatch) summary += `📝 *Description:* ${descMatch[1].trim()}\n`;
+        summary += `\n🔗 *Total links/assets found:* ${resolved.length}\n`;
+        summary += `🏠 *Same-domain:* ${sameDomain.length}\n`;
+        summary += `🌍 *External domains (${externalDomains.length}):*\n${externalDomains.slice(0, 20).map(d => `• ${d}`).join('\n') || '(none)'}\n`;
+        if (apiLike.length) {
+            summary += `\n⚙️ *Possible API/endpoint-looking links (${apiLike.length}):*\n${apiLike.slice(0, 15).map(u => `• ${u}`).join('\n')}`;
+        }
+
+        // Full link dump can be huge — goes into the attached file, only
+        // the summary (capped) goes in the chat message itself.
+        if (!fs.existsSync('./tmp')) fs.mkdirSync('./tmp');
+        const outPath = `./tmp/sra_${Date.now()}.txt`;
+        fs.writeFileSync(outPath, resolved.join('\n'));
+
+        await devtrust.sendMessage(m.chat, {
+            document: fs.readFileSync(outPath),
+            fileName: 'links.txt',
+            mimetype: 'text/plain',
+            caption: summary.slice(0, 4000)
+        }, { quoted: m });
+
+        fs.unlinkSync(outPath);
+    } catch (e) {
+        console.error('Sra error:', e);
+        reply(`❌ *Scan failed:* ${e.message}`);
+    }
+}
+break;
+
 // ============ EPHOTO TEXT EFFECTS ============
 // Uses w5-textmaker (unofficial textpro.me/photooxy scraper, GPLv3).
 // Response shape isn't documented anywhere I could verify, so this checks
@@ -16997,7 +17066,8 @@ case "play": {
         try {
             data = await prexzyGet('/download/ytmp3', { url: ytUrl });
         } catch (apiErr) {
-            if (apiErr.response?.status === 403) {
+            const is403 = apiErr.response?.status === 403 || /\b403\b/.test(apiErr.message || '');
+            if (is403) {
                 return reply(`❌ *Prexzy API itself blocked this request (403)* — not the download link, the API call. Tried adding a browser User-Agent header; if this still 403s, Prexzy may be blocking this server's IP or requires an API key now. Worth checking prexzyapis.com's docs/Discord for current access requirements.`);
             }
             throw apiErr;
@@ -17022,7 +17092,8 @@ case "play": {
                 timeout: 180000 // was 60s — no duration cap now, so longer tracks need more room
             });
         } catch (fetchErr) {
-            if (fetchErr.response?.status === 403) {
+            const is403 = fetchErr.response?.status === 403 || /\b403\b/.test(fetchErr.message || '');
+            if (is403) {
                 // IP-locked link, as expected. Dump Prexzy's full raw
                 // response so we can check for another field (a
                 // Prexzy-hosted/proxied URL, not a Google CDN redirect)
@@ -17042,7 +17113,7 @@ case "play": {
         }, { quoted: m });
 
     } catch (e) {
-        console.log(chalk.red(`❌ .play error: ${e.message}`));
+        console.log(chalk.red(`❌ .play error: ${e.message} | has response: ${!!e.response} | status: ${e.response?.status} | status type: ${typeof e.response?.status}`));
         reply(`❌ *Download failed:* ${e.message}\n\nTry again later, or use a direct link with .yta instead.`);
     }
 }
