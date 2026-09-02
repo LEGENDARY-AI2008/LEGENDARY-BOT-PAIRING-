@@ -10560,7 +10560,7 @@ async function antiAction(action, reason, warningEmoji, targetKey) {
 }
 
 if (!devtrust.public) {
-    if (!isCreator) return
+    if (!isCreator && !isSudo) return
 }
 
 // SPECIAL CHECK: If user types ONLY the default "." - show THEIR current prefix
