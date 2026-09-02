@@ -16959,8 +16959,23 @@ case "play": {
             return reply(`❌ *Download failed.* ${data?.error || data?.message || 'no audio link returned'}`);
         }
 
+        // Prexzy's ytmp3 endpoint resolves straight to a raw
+        // googlevideo.com CDN link, not a stable hosted file (unlike
+        // most other Prexzy endpoints). Those links are short-lived and
+        // reject fetches without proper headers — handing that URL
+        // straight to Baileys (`audio: { url: ... }`) makes Baileys try
+        // to fetch it itself and fail with "Failed to fetch stream from
+        // ...". Downloading it ourselves first, with a real User-Agent,
+        // and sending the buffer instead sidesteps that entirely.
+        const audioResp = await axios.get(audioLink, {
+            responseType: 'arraybuffer',
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+            timeout: 60000
+        });
+        const audioBuffer = Buffer.from(audioResp.data);
+
         return await devtrust.sendMessage(m.chat, {
-            audio: { url: audioLink },
+            audio: audioBuffer,
             mimetype: 'audio/mpeg',
             fileName: `${trackName}.mp3`,
             ptt: false
