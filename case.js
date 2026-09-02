@@ -16941,8 +16941,6 @@ case "play": {
         const artistName = vid.author.name;
         const duration = vid.seconds;
 
-        if (duration > 1800) return reply('❌ *Audio too long (max 30 minutes)*');
-
         reply(`🎵 *Found:* ${trackName}\n👤 *${artistName}*\n⏳ *Downloading...*`);
 
         const ytUrl = `https://www.youtube.com/watch?v=${vid.videoId}`;
@@ -16962,16 +16960,28 @@ case "play": {
         // Prexzy's ytmp3 endpoint resolves straight to a raw
         // googlevideo.com CDN link, not a stable hosted file (unlike
         // most other Prexzy endpoints). Those links are short-lived and
-        // reject fetches without proper headers — handing that URL
-        // straight to Baileys (`audio: { url: ... }`) makes Baileys try
-        // to fetch it itself and fail with "Failed to fetch stream from
-        // ...". Downloading it ourselves first, with a real User-Agent,
-        // and sending the buffer instead sidesteps that entirely.
-        const audioResp = await axios.get(audioLink, {
-            responseType: 'arraybuffer',
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-            timeout: 60000
-        });
+        // signature-locked to whichever IP first requested them from
+        // Google (Prexzy's server) — no header changes fix that, since
+        // it's an IP check, not a header check. Downloading it ourselves
+        // still hits the same wall as handing it to Baileys did.
+        let audioResp;
+        try {
+            audioResp = await axios.get(audioLink, {
+                responseType: 'arraybuffer',
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+                timeout: 180000 // was 60s — no duration cap now, so longer tracks need more room
+            });
+        } catch (fetchErr) {
+            if (fetchErr.response?.status === 403) {
+                // IP-locked link, as expected. Dump Prexzy's full raw
+                // response so we can check for another field (a
+                // Prexzy-hosted/proxied URL, not a Google CDN redirect)
+                // that isn't IP-locked, instead of guessing blind.
+                const rawDump = JSON.stringify(data, null, 2).slice(0, 1200);
+                return reply(`❌ *Download failed:* Google CDN link is IP-locked (403) — this endpoint hands back a link tied to Prexzy's own server, not a proxied file.\n\n📋 *Raw API response (send this to LËGĒNDÃRY LAB™):*\n\`\`\`${rawDump}\`\`\``);
+            }
+            throw fetchErr;
+        }
         const audioBuffer = Buffer.from(audioResp.data);
 
         return await devtrust.sendMessage(m.chat, {
