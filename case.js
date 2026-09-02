@@ -353,7 +353,8 @@ const PREXZY_BASE = 'https://prexzyapis.com';
 async function prexzyGet(endpoint, extraParams = {}, timeoutMs = 25000) {
     const res = await axios.get(`${PREXZY_BASE}${endpoint}`, {
         params: extraParams,
-        timeout: timeoutMs
+        timeout: timeoutMs,
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
     });
     return res.data;
 }
@@ -16951,7 +16952,15 @@ case "play": {
         // Prexzy's /download/ytmp3 endpoint instead means Prexzy's
         // servers do the fetching, not us — same pattern already used
         // for fb/twit/etc via prexzyDownloadAndSend.
-        const data = await prexzyGet('/download/ytmp3', { url: ytUrl });
+        let data;
+        try {
+            data = await prexzyGet('/download/ytmp3', { url: ytUrl });
+        } catch (apiErr) {
+            if (apiErr.response?.status === 403) {
+                return reply(`❌ *Prexzy API itself blocked this request (403)* — not the download link, the API call. Tried adding a browser User-Agent header; if this still 403s, Prexzy may be blocking this server's IP or requires an API key now. Worth checking prexzyapis.com's docs/Discord for current access requirements.`);
+            }
+            throw apiErr;
+        }
         const audioLink = madrinExtractLink(data);
         if (data?.status === false || !audioLink) {
             return reply(`❌ *Download failed.* ${data?.error || data?.message || 'no audio link returned'}`);
