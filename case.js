@@ -10120,6 +10120,109 @@ if (getSetting(botNumber + m.chat, "feature.antibadword", false) && m.isGroup &&
    }
 }
 
+// ── 7. ANTIWORD (custom word list, .antiword) ───────────────────────────────
+if (m.isGroup && !isAdmins && !isCreator) {
+    const awCfg = getSetting(botNumber + m.chat, "antiword", { active: false, action: 'delete', warnc: 3, words: [] });
+    if (awCfg.active && awCfg.words?.length) {
+        const awText = [
+            body,
+            m.message?.conversation,
+            m.message?.extendedTextMessage?.text,
+            m.message?.imageMessage?.caption,
+            m.message?.videoMessage?.caption,
+        ].filter(Boolean).join(' ').toLowerCase();
+        const hitWord = awText && awCfg.words.find(w => awText.includes(w.toLowerCase()));
+        if (hitWord) {
+            try { await devtrust.sendMessage(m.chat, { delete: m.key }); } catch (e) {}
+            if (awCfg.action === 'delete') {
+                await reply(`❌ @${m.sender.split('@')[0]} that word is not allowed here!`, [m.sender]);
+            } else if (awCfg.action === 'kick') {
+                try {
+                    await devtrust.groupParticipantsUpdate(m.chat, [m.sender], 'remove');
+                    await reply(`👢 @${m.sender.split('@')[0]} kicked for using a prohibited word`, [m.sender]);
+                } catch (e) {
+                    await reply(`⚠️ @${m.sender.split('@')[0]} used a prohibited word (couldn't kick — make me admin)`, [m.sender]);
+                }
+            } else if (awCfg.action === 'warn') {
+                const { count, shouldKick } = bumpAntiFeatureWarn('antiword', m.chat, m.sender, awCfg.warnc || 3);
+                if (shouldKick) {
+                    try {
+                        await devtrust.groupParticipantsUpdate(m.chat, [m.sender], 'remove');
+                        await reply(`👢 @${m.sender.split('@')[0]} reached ${awCfg.warnc}/${awCfg.warnc} warnings and was kicked`, [m.sender]);
+                    } catch (e) {
+                        await reply(`⚠️ @${m.sender.split('@')[0]} hit the warning limit but I couldn't kick — make me admin.`, [m.sender]);
+                    }
+                } else {
+                    await reply(`⚠️ @${m.sender.split('@')[0]} that word is not allowed! Warning *${count}/${awCfg.warnc}*`, [m.sender]);
+                }
+            }
+            return;
+        }
+    }
+}
+
+// ── 8. ANTIGM (status group-mention, .antigm) ──────────────────────────────
+if (m.isGroup && !isAdmins && !isCreator && m.message?.groupStatusMentionMessage) {
+    const gmCfg = getSetting(botNumber + m.chat, "antigm", { enabled: false, action: 'delete', maxwrn: 3 });
+    if (gmCfg.enabled) {
+        try { await devtrust.sendMessage(m.chat, { delete: m.key }); } catch (e) {}
+        if (gmCfg.action === 'delete') {
+            await reply(`⚠️ @${m.sender.split('@')[0]} status-mentioning this group is not allowed!`, [m.sender]);
+        } else if (gmCfg.action === 'kick') {
+            try {
+                await devtrust.groupParticipantsUpdate(m.chat, [m.sender], 'remove');
+                await reply(`👢 @${m.sender.split('@')[0]} kicked for status-mentioning this group`, [m.sender]);
+            } catch (e) {
+                await reply(`⚠️ @${m.sender.split('@')[0]} status-mentioned this group (couldn't kick — make me admin)`, [m.sender]);
+            }
+        } else if (gmCfg.action === 'warn') {
+            const { count, shouldKick } = bumpAntiFeatureWarn('antigm', m.chat, m.sender, gmCfg.maxwrn || 3);
+            if (shouldKick) {
+                try {
+                    await devtrust.groupParticipantsUpdate(m.chat, [m.sender], 'remove');
+                    await reply(`👢 @${m.sender.split('@')[0]} reached max warnings for status-mentioning this group and was kicked`, [m.sender]);
+                } catch (e) {
+                    await reply(`⚠️ @${m.sender.split('@')[0]} hit the warning limit but I couldn't kick — make me admin.`, [m.sender]);
+                }
+            } else {
+                await reply(`⚠️ @${m.sender.split('@')[0]} status-mentioning this group is not allowed! Warning *${count}/${gmCfg.maxwrn}*`, [m.sender]);
+            }
+        }
+        return;
+    }
+}
+
+// ── 9. ANTIGCSTATUS (group status posts, .antigcstatus) ────────────────────
+if (m.isGroup && !isAdmins && !isCreator && m.mtype === 'groupStatusMessageV2') {
+    const gsCfg = getSetting(botNumber + m.chat, "antigcstatus", { enabled: false, action: 'delete', maxwrn: 3 });
+    if (gsCfg.enabled) {
+        try { await devtrust.sendMessage(m.chat, { delete: m.key }); } catch (e) {}
+        if (gsCfg.action === 'delete') {
+            await reply(`⚠️ @${m.sender.split('@')[0]} group status posts are not allowed here!`, [m.sender]);
+        } else if (gsCfg.action === 'kick') {
+            try {
+                await devtrust.groupParticipantsUpdate(m.chat, [m.sender], 'remove');
+                await reply(`👢 @${m.sender.split('@')[0]} kicked for posting a group status`, [m.sender]);
+            } catch (e) {
+                await reply(`⚠️ @${m.sender.split('@')[0]} posted a group status (couldn't kick — make me admin)`, [m.sender]);
+            }
+        } else if (gsCfg.action === 'warn') {
+            const { count, shouldKick } = bumpAntiFeatureWarn('antigcstatus', m.chat, m.sender, gsCfg.maxwrn || 3);
+            if (shouldKick) {
+                try {
+                    await devtrust.groupParticipantsUpdate(m.chat, [m.sender], 'remove');
+                    await reply(`👢 @${m.sender.split('@')[0]} reached max warnings for group status posts and was kicked`, [m.sender]);
+                } catch (e) {
+                    await reply(`⚠️ @${m.sender.split('@')[0]} hit the warning limit but I couldn't kick — make me admin.`, [m.sender]);
+                }
+            } else {
+                await reply(`⚠️ @${m.sender.split('@')[0]} group status posts are not allowed! Warning *${count}/${gsCfg.maxwrn}*`, [m.sender]);
+            }
+        }
+        return;
+    }
+}
+
 // ── AUTO STATUS / MENTION REACT (must also stay above the private-mode gate) ──
 // Was checking getSetting(m.sender, ...) — m.sender on a status event is
 // whoever POSTED the status (a random contact), never the bot's own
@@ -11209,6 +11312,40 @@ if (!devtrust._gcsListenerReady) {
         }
     });
 } // end devtrust._gcsListenerReady guard
+
+// ===== AKICK (auto-kick list enforcement) =====
+// Independent of welcome messages on purpose — akick should keep working
+// even in groups that have welcome messages turned off. Anyone on a
+// group's akick list (managed via the .akick command) gets removed the
+// moment they try to (re)join.
+if (!devtrust._akickListenerReady) {
+    devtrust._akickListenerReady = true;
+
+    devtrust.ev.on('group-participants.update', async (update) => {
+        try {
+            const { id, participants, action } = update;
+            if (action !== 'add') return;
+            const botNumber = await devtrust.decodeJid(devtrust.user.id);
+            const akList = getSetting(botNumber + id, "akick", []);
+            if (!akList.length) return;
+            for (const user of participants) {
+                const userId = typeof user === "string" ? user : user.id;
+                if (!userId || !akList.includes(userId)) continue;
+                try {
+                    await devtrust.groupParticipantsUpdate(id, [userId], 'remove');
+                    await devtrust.sendMessage(id, {
+                        text: `🚫 @${userId.split('@')[0]} is on the auto-kick list and was removed.`,
+                        mentions: [userId]
+                    });
+                } catch (err) {
+                    console.log('akick enforcement error:', err);
+                }
+            }
+        } catch (err) {
+            console.log('akick listener error:', err);
+        }
+    });
+} // end devtrust._akickListenerReady guard
 
 // ===== ANTI-DEMOTE / ANTI-PROMOTE (.antidemote / .antipromote) =====
 // Per-group toggles. Unlike .gcs (which protects the BOT's own admin status
@@ -12406,7 +12543,24 @@ case "quoted": {
     const quotedMsg = m.quoted;
     const qSender = quotedMsg.sender || quotedMsg.key?.participant || quotedMsg.key?.remoteJid;
     const qType = quotedMsg.mtype || 'unknown';
-    reply(`📌 *Quoted Message Info*\n▸ Sender: @${qSender?.replace('@s.whatsapp.net', '')}\n▸ Type: ${qType}\n▸ ID: ${quotedMsg.id || quotedMsg.key?.id}`, { mentions: [qSender] });
+    let info = `📌 *Quoted Message Info*\n▸ Sender: @${qSender?.replace('@s.whatsapp.net', '')}\n▸ Type: ${qType}\n▸ ID: ${quotedMsg.id || quotedMsg.key?.id}`;
+    const mentions = [qSender];
+
+    // Was the quoted message itself a reply to another message? Dig into its raw contextInfo.
+    const nestedCtx = quotedMsg.message?.extendedTextMessage?.contextInfo;
+    const nestedQuoted = nestedCtx?.quotedMessage;
+    if (nestedQuoted) {
+        const nestedSender = nestedCtx.participant;
+        const nestedType = Object.keys(nestedQuoted)[0] || 'unknown';
+        const nestedText = nestedQuoted.conversation || nestedQuoted.extendedTextMessage?.text || '';
+        info += `\n\n↪️ *That message was itself a reply to:*\n▸ Sender: @${nestedSender?.replace('@s.whatsapp.net', '')}\n▸ Type: ${nestedType}\n▸ ID: ${nestedCtx.stanzaId || 'unknown'}`;
+        if (nestedText) info += `\n▸ Text: ${nestedText.slice(0, 200)}`;
+        if (nestedSender) mentions.push(nestedSender);
+    } else {
+        info += `\n\n↪️ _That message was not a reply to anything else_`;
+    }
+
+    reply(info, { mentions });
 }
 break;
 
@@ -21264,9 +21418,9 @@ case 'setgcpp': {
         await devtrust.removeProfilePicture(m.chat);
         return reply('✓ Group profile picture removed');
     }
-    if (!m.quoted) return reply('✘ Reply to an image');
+    if (!m.quoted?.message?.imageMessage) return reply('✘ Reply to an image');
     try {
-        const gppMedia = await downloadMediaMessage(m.quoted, 'buffer', {});
+        const gppMedia = await m.quoted.download();
         await devtrust.updateProfilePicture(m.chat, gppMedia);
         reply('✓ Group profile picture updated');
     } catch (e) { reply('✘ ' + e.message); }
@@ -23513,6 +23667,308 @@ case 'addai': {
     } catch (e) {
         console.error(e);
         reply(`❌ *Failed to add Meta AI:*\n${String(e?.message || e)}`);
+    }
+}
+break;
+
+// ============================================================
+// ================ MERGED FROM UPLOADED PLUGINS ===============
+// ============================================================
+
+// ===== ANTIWORD (custom word filter) =====
+case 'antiword': {
+    if (!m.isGroup) return reply('👥 *Groups only*');
+    if (!isAdmins && !isCreator) return reply('🔒 *Admins only*');
+    const awCfg = getSetting(botNumber + m.chat, "antiword", { active: false, action: 'delete', warnc: 3, words: [] });
+
+    if (!args[0]) {
+        return reply(`🚫 *AntiWord*\n\n` +
+            `📌 *Usage:*\n` +
+            `▸ ${prefix}antiword on\n` +
+            `▸ ${prefix}antiword action kick/delete/warn 3\n` +
+            `▸ ${prefix}antiword warnc 5\n` +
+            `▸ ${prefix}antiword status\n` +
+            `▸ ${prefix}antiword remove <word1,word2>/all\n` +
+            `▸ ${prefix}antiword off\n` +
+            `▸ ${prefix}antiword word1, word2 _(adds words)_\n\n` +
+            `⚙️ *Status:* ${awCfg.active ? 'ON ✅' : 'OFF ❌'}\n` +
+            `⚙️ *Action:* ${awCfg.action}${awCfg.action === 'warn' ? ` (${awCfg.warnc})` : ''}\n` +
+            `⚙️ *Words:* ${awCfg.words.join(', ') || 'None'}`);
+    }
+
+    const sub = args[0].toLowerCase();
+    const reserved = ['on', 'off', 'action', 'warnc', 'status', 'get', 'remove', 'rm'];
+
+    if (sub === 'on') {
+        awCfg.active = true;
+        setSetting(botNumber + m.chat, "antiword", awCfg);
+        return reply(`✅ *AntiWord enabled* (${awCfg.action})`);
+    }
+    if (sub === 'off') {
+        awCfg.active = false;
+        setSetting(botNumber + m.chat, "antiword", awCfg);
+        return reply('❌ *AntiWord disabled*');
+    }
+    if (sub === 'action') {
+        const act = args[1]?.toLowerCase();
+        if (!['kick', 'delete', 'warn'].includes(act)) return reply(`✘ Use: ${prefix}antiword action kick/delete/warn 3`);
+        awCfg.active = true;
+        awCfg.action = act;
+        if (act === 'warn') awCfg.warnc = parseInt(args[2]) || awCfg.warnc || 3;
+        setSetting(botNumber + m.chat, "antiword", awCfg);
+        return reply(`✅ *AntiWord action set to:* ${act}${act === 'warn' ? ` (${awCfg.warnc})` : ''}`);
+    }
+    if (sub === 'warnc') {
+        const n = parseInt(args[1]);
+        if (!n || n < 1) return reply(`✘ Usage: ${prefix}antiword warnc <number>`);
+        awCfg.warnc = n;
+        setSetting(botNumber + m.chat, "antiword", awCfg);
+        return reply(`✅ *Warn count set to:* ${n}`);
+    }
+    if (sub === 'status' || sub === 'get') {
+        return reply(`\`\`\`[ ANTIWORD STATUS ]\nActive: ${awCfg.active}\nAction: ${awCfg.action}\nWarn Count: ${awCfg.warnc}\nWords: ${awCfg.words.join(', ') || 'None'}\`\`\``);
+    }
+    if (sub === 'remove' || sub === 'rm') {
+        const val = args.slice(1).join(' ');
+        if (!val) return reply(`✘ Usage: ${prefix}antiword remove <word1,word2> or ${prefix}antiword remove all`);
+        if (val.toLowerCase() === 'all') {
+            awCfg.words = [];
+            setSetting(botNumber + m.chat, "antiword", awCfg);
+            return reply('✅ *All words removed*');
+        }
+        const toRemove = val.toLowerCase().split(',').map(w => w.trim());
+        awCfg.words = awCfg.words.filter(w => !toRemove.includes(w));
+        setSetting(botNumber + m.chat, "antiword", awCfg);
+        return reply(`✅ *Removed:* ${toRemove.join(', ')}`);
+    }
+    if (reserved.includes(sub)) {
+        return reply(`✘ "${sub}" is a reserved keyword, use ${prefix}antiword for help`);
+    }
+    // Anything else: treat the whole text as a comma-separated list of words to add
+    const newWords = text.toLowerCase().split(',').map(w => w.trim()).filter(Boolean);
+    const already = newWords.filter(w => awCfg.words.includes(w));
+    const fresh = newWords.filter(w => !awCfg.words.includes(w));
+    awCfg.words.push(...fresh);
+    setSetting(botNumber + m.chat, "antiword", awCfg);
+    let awMsg = '';
+    if (fresh.length) awMsg += `✅ *Added:* ${fresh.join(', ')}\n`;
+    if (already.length) awMsg += `⚠️ *Already existed:* ${already.join(', ')}`;
+    return reply(awMsg || '✘ No valid words provided');
+}
+break;
+
+// ===== ANTIGM (anti group-status-mention) =====
+case 'antigm': {
+    if (!m.isGroup) return reply('👥 *Groups only*');
+    if (!isAdmins && !isCreator) return reply('🔒 *Admins only*');
+    const gmCfg = getSetting(botNumber + m.chat, "antigm", { enabled: false, action: 'delete', maxwrn: 3 });
+
+    if (!args[0]) {
+        return reply(`📵 *AntiGM*\n_Action when someone @-mentions this group in their WhatsApp status._\n\n` +
+            `📌 *Usage:*\n▸ ${prefix}antigm delete\n▸ ${prefix}antigm kick\n▸ ${prefix}antigm warn 3\n▸ ${prefix}antigm status\n▸ ${prefix}antigm off\n\n` +
+            `⚙️ *Status:* ${gmCfg.enabled ? 'ON ✅' : 'OFF ❌'}\n⚙️ *Action:* ${gmCfg.enabled ? gmCfg.action : '-'}`);
+    }
+    const opt = args[0].toLowerCase();
+    if (opt === 'delete') { setSetting(botNumber + m.chat, "antigm", { enabled: true, action: 'delete', maxwrn: gmCfg.maxwrn }); return reply('✅ *AntiGM enabled* (delete mode)'); }
+    if (opt === 'kick') { setSetting(botNumber + m.chat, "antigm", { enabled: true, action: 'kick', maxwrn: gmCfg.maxwrn }); return reply('✅ *AntiGM enabled* (kick mode)'); }
+    if (opt === 'warn') {
+        const n = parseInt(args[1]);
+        if (!n) return reply(`✘ Use ${prefix}antigm warn 3`);
+        setSetting(botNumber + m.chat, "antigm", { enabled: true, action: 'warn', maxwrn: n });
+        return reply(`✅ *AntiGM enabled* (warn mode, max ${n})`);
+    }
+    if (opt === 'status') return reply(`\`\`\`[ ANTIGM STATUS ]\nActive: ${gmCfg.enabled}\nAction: ${gmCfg.action}\nMaxWarn: ${gmCfg.maxwrn}\`\`\``);
+    if (opt === 'off') { setSetting(botNumber + m.chat, "antigm", { enabled: false, action: 'delete', maxwrn: gmCfg.maxwrn }); return reply('❌ *AntiGM disabled*'); }
+    return reply('✘ Invalid option. Use: delete, kick, warn, status, off');
+}
+break;
+
+// ===== ANTIGCSTATUS (anti group-status-post) =====
+case 'antigcstatus': {
+    if (!m.isGroup) return reply('👥 *Groups only*');
+    if (!isAdmins && !isCreator) return reply('🔒 *Admins only*');
+    const gsCfg = getSetting(botNumber + m.chat, "antigcstatus", { enabled: false, action: 'delete', maxwrn: 3 });
+
+    if (!args[0]) {
+        return reply(`📴 *AntiGcStatus*\n_Action when a member posts to this group's status feed._\n\n` +
+            `📌 *Usage:*\n▸ ${prefix}antigcstatus delete\n▸ ${prefix}antigcstatus kick\n▸ ${prefix}antigcstatus warn 3\n▸ ${prefix}antigcstatus status\n▸ ${prefix}antigcstatus off\n\n` +
+            `⚙️ *Status:* ${gsCfg.enabled ? 'ON ✅' : 'OFF ❌'}\n⚙️ *Action:* ${gsCfg.enabled ? gsCfg.action : '-'}`);
+    }
+    const opt = args[0].toLowerCase();
+    if (opt === 'delete') { setSetting(botNumber + m.chat, "antigcstatus", { enabled: true, action: 'delete', maxwrn: gsCfg.maxwrn }); return reply('✅ *AntiGcStatus enabled* (delete mode)'); }
+    if (opt === 'kick') { setSetting(botNumber + m.chat, "antigcstatus", { enabled: true, action: 'kick', maxwrn: gsCfg.maxwrn }); return reply('✅ *AntiGcStatus enabled* (kick mode)'); }
+    if (opt === 'warn') {
+        const n = parseInt(args[1]);
+        if (!n) return reply(`✘ Use ${prefix}antigcstatus warn 3`);
+        setSetting(botNumber + m.chat, "antigcstatus", { enabled: true, action: 'warn', maxwrn: n });
+        return reply(`✅ *AntiGcStatus enabled* (warn mode, max ${n})`);
+    }
+    if (opt === 'status') return reply(`\`\`\`[ ANTIGCSTATUS STATUS ]\nActive: ${gsCfg.enabled}\nAction: ${gsCfg.action}\nMaxWarn: ${gsCfg.maxwrn}\`\`\``);
+    if (opt === 'off') { setSetting(botNumber + m.chat, "antigcstatus", { enabled: false, action: 'delete', maxwrn: gsCfg.maxwrn }); return reply('❌ *AntiGcStatus disabled*'); }
+    return reply('✘ Invalid option. Use: delete, kick, warn, status, off');
+}
+break;
+
+// ===== AKICK (auto-kick list) =====
+case 'akick': {
+    if (!m.isGroup) return reply('👥 *Groups only*');
+    if (!isAdmins && !isCreator) return reply('🔒 *Admins only*');
+    if (!isBotAdmins) return reply('✘ Bot needs to be admin');
+
+    const akMentioned = m.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+    const isRemoveCmd = args[0]?.toLowerCase() === 'remove';
+    const isListCmd = args[0]?.toLowerCase() === 'list';
+    const numberArg = isRemoveCmd ? args[1] : args[0];
+
+    if (isListCmd) {
+        const list = getSetting(botNumber + m.chat, "akick", []);
+        if (!list.length) return reply('_No users in auto-kick list_');
+        return reply(`🚫 *Auto-Kick List:*\n${list.map((j, i) => `${i + 1}. @${j.split('@')[0]}`).join('\n')}`, list);
+    }
+
+    const akUser = akMentioned[0] || m.quoted?.sender || (numberArg && toParticipantJid(numberArg));
+    if (!akUser) return reply(`✘ Reply to or mention a member\n_To remove:_ ${prefix}akick remove 234xxxxxxxxx\n_To list:_ ${prefix}akick list`);
+
+    const akList = getSetting(botNumber + m.chat, "akick", []);
+
+    if (isRemoveCmd) {
+        if (!akList.includes(akUser)) return reply('✘ User is not in the auto-kick list');
+        setSetting(botNumber + m.chat, "akick", akList.filter(j => j !== akUser));
+        return reply(`✅ @${akUser.split('@')[0]} removed from auto-kick list`, [akUser]);
+    }
+
+    if (akList.includes(akUser)) return reply('⚠️ User is already in the auto-kick list');
+    akList.push(akUser);
+    setSetting(botNumber + m.chat, "akick", akList);
+    try {
+        await devtrust.groupParticipantsUpdate(m.chat, [akUser], 'remove');
+        reply(`✅ @${akUser.split('@')[0]} added to auto-kick list and removed`, [akUser]);
+    } catch (e) {
+        reply(`✅ @${akUser.split('@')[0]} added to auto-kick list (couldn't remove them right now: ${e.message})`, [akUser]);
+    }
+}
+break;
+
+// ===== PHOTO/TOIMG (sticker -> image) =====
+case 'photo':
+case 'toimg': {
+    if (!m.quoted?.sticker) return reply('✘ Reply to a sticker');
+    if (m.quoted?.isAnimated) return reply('✘ Reply to a static (non-animated) sticker');
+    try {
+        const buff = await m.quoted.download();
+        await devtrust.sendMessage(m.chat, { image: buff }, { quoted: m });
+    } catch (e) {
+        reply('✘ ' + e.message);
+    }
+}
+break;
+
+// ===== ADDITIONAL AUDIO EFFECTS (smooth, tremolo, vibrato, 8d, flanger) =====
+case "smooth": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🌊 *Smooth Effect*\nReply to audio: ${prefix}smooth`); try { reply('⏳ *Applying smooth effect...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('asubboost=dry=0:wet=1:decay=0.1:feedback=0.1:cutoff=100:slope=0.5:delay=20').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+
+case "tremolo": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`〰️ *Tremolo Effect*\nReply to audio: ${prefix}tremolo`); try { reply('⏳ *Applying tremolo...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('tremolo=f=6:d=0.5').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+
+case "vibrato": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🎻 *Vibrato Effect*\nReply to audio: ${prefix}vibrato`); try { reply('⏳ *Applying vibrato...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('vibrato=f=7:d=0.5').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+
+case "8d": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🎧 *8D Audio*\nReply to audio: ${prefix}8d`); try { reply('⏳ *Applying 8D effect...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('apulsator=hz=0.125').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+
+case "flanger": { if (!m.quoted?.message?.audioMessage && !m.message?.audioMessage) return reply(`🌀 *Flanger Effect*\nReply to audio: ${prefix}flanger`); try { reply('⏳ *Applying flanger...*'); const ffmpeg = require('fluent-ffmpeg'); const quoted = m.quoted || m; const media = await downloadMediaMessage(quoted, 'buffer', {}); const tmpIn = `./tmp/in_${Date.now()}.mp3`; const tmpOut = `./tmp/out_${Date.now()}.mp3`; fs.writeFileSync(tmpIn, media); await new Promise((res, rej) => ffmpeg(tmpIn).audioFilters('flanger=delay=5:depth=2:regen=5:width=5:speed=2:shape=sine:phase=90:interp=linear').save(tmpOut).on('end', res).on('error', rej)); const buf = fs.readFileSync(tmpOut); fs.unlinkSync(tmpIn); fs.unlinkSync(tmpOut); await devtrust.sendMessage(m.chat, { audio: buf, mimetype: 'audio/mpeg', ptt: false }, { quoted: m }); } catch(e) { reply(`❌ *Error:* ${e.message}`); } } break;
+
+// ===== GCSTATUS/UPSWGC (post a WhatsApp group status) =====
+// Ported from the uploaded group-commands file, with two fixes applied:
+//  1. The original checked `m.isAdmin` (never set anywhere — always
+//     undefined), so real admins got silently blocked in the two hardcoded
+//     groups. Now uses the actual isAdmins/isCreator booleans this file
+//     already computes per-message.
+//  2. m.client / Baileys() swapped for this file's own devtrust +
+//     top-level prepareWAMessageMedia/generateWAMessageFromContent/proto,
+//     which are already available here.
+case 'gcstatus':
+case 'upswgc': {
+    try {
+        const GCSTATUS_COLORS = {
+            green: 0xFF25D366, red: 0xFFFF0000, blue: 0xFF0000FF, yellow: 0xFFFFFF00,
+            purple: 0xFF800080, black: 0xFF000000, white: 0xFFFFFFFF, orange: 0xFFFFA500
+        };
+
+        const gcQuoted = m.quoted;
+        const gcIsImage = gcQuoted?.image;
+        const gcIsVideo = gcQuoted?.video;
+        const gcIsAudio = gcQuoted?.audio;
+
+        // Restrict to specific groups if configured — real admin check this time.
+        const restrictedGroups = ["120363425297756989@g.us", "120363420506313518@g.us"];
+        if (restrictedGroups.includes(m.chat) && !isAdmins && !isCreator) {
+            return reply('_not this group_');
+        }
+
+        let gcGroupId, gcMessageText, gcChosenColor = null;
+
+        if (!m.isGroup) {
+            if (gcQuoted && (gcIsImage || gcIsVideo || gcIsAudio)) {
+                if (!text) return reply(`Provide the group JID.\nUsage: ${prefix}gcstatus groupjid\nExample: ${prefix}gcstatus 123456789-123456@g.us`);
+                gcGroupId = text.trim();
+            } else {
+                if (!text) return reply(`Usage: ${prefix}gcstatus groupjid,message,color\nExample: ${prefix}gcstatus 123456789-123456@g.us,Hello!,blue\nColors: ${Object.keys(GCSTATUS_COLORS).join(', ')}`);
+                const parts = text.split(',').map(p => p.trim());
+                if (parts.length < 2) return reply(`Provide at least group JID and text.\nExample: ${prefix}gcstatus 123456789-123456@g.us,Hello!`);
+                gcGroupId = parts[0];
+                gcMessageText = parts[1];
+                if (parts[2] && GCSTATUS_COLORS[parts[2].toLowerCase()]) gcChosenColor = GCSTATUS_COLORS[parts[2].toLowerCase()];
+            }
+        } else {
+            gcGroupId = m.chat;
+            gcMessageText = text;
+        }
+
+        if (!gcIsImage && !gcIsVideo && !gcIsAudio && !gcMessageText) {
+            return reply(`Reply to media or provide text\n\nExamples:\n${prefix}gcstatus\n${prefix}gcstatus Hello Group\n${prefix}gcstatus Hello Group,red\nColors: ${Object.keys(GCSTATUS_COLORS).join(', ')}`);
+        }
+
+        let gcPayload = {};
+
+        if (gcIsImage || gcIsVideo || gcIsAudio) {
+            const mediaBuffer = await gcQuoted.download();
+            let mediaOptions = {};
+            if (gcIsImage) mediaOptions = { image: mediaBuffer, caption: gcQuoted.text || '' };
+            else if (gcIsVideo) mediaOptions = { video: mediaBuffer, caption: gcQuoted.text || '' };
+            else if (gcIsAudio) mediaOptions = { audio: mediaBuffer, mimetype: gcQuoted.mimetype, ptt: gcQuoted.ptt || false, seconds: gcQuoted.seconds, waveform: gcQuoted.waveform };
+
+            const preparedMedia = await prepareWAMessageMedia(mediaOptions, { upload: devtrust.waUploadToServer });
+
+            let gcMediaMessage = {};
+            if (gcIsImage) gcMediaMessage = { imageMessage: preparedMedia.imageMessage };
+            else if (gcIsVideo) gcMediaMessage = { videoMessage: preparedMedia.videoMessage };
+            else if (gcIsAudio) gcMediaMessage = { audioMessage: preparedMedia.audioMessage };
+
+            gcPayload = { groupStatusMessageV2: { message: gcMediaMessage } };
+        } else {
+            let bgColor = gcChosenColor ?? (() => {
+                const randomHex = Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
+                return 0xff000000 + parseInt(randomHex, 16);
+            })();
+
+            if (m.isGroup && gcMessageText?.includes(',')) {
+                const parts = gcMessageText.split(',').map(p => p.trim());
+                gcMessageText = parts[0];
+                if (parts[1] && GCSTATUS_COLORS[parts[1].toLowerCase()]) bgColor = GCSTATUS_COLORS[parts[1].toLowerCase()];
+            }
+
+            gcPayload = {
+                groupStatusMessageV2: {
+                    message: { extendedTextMessage: { text: gcMessageText, backgroundArgb: bgColor, font: 2 } }
+                }
+            };
+        }
+
+        const gcMsg = generateWAMessageFromContent(gcGroupId, proto.Message.fromObject(gcPayload), { userJid: devtrust.user.id });
+        await devtrust.relayMessage(gcGroupId, gcMsg.message, { messageId: gcMsg.key.id });
+
+        if (!m.isGroup) await reply('Group status sent successfully.');
+        try { await devtrust.sendMessage(m.chat, { react: { text: '✓', key: m.key } }); } catch (e) {}
+    } catch (e) {
+        console.log('cmd error', e);
+        reply('✘ ' + e.message);
     }
 }
 break;
