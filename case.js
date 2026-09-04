@@ -9467,6 +9467,14 @@ module.exports = devtrust = async (devtrust, m, chatUpdate, store) => {
 const { from } = m
 try {
 
+// The serializer's quoted-message .download() helper (used by .vv, .gpp,
+// .gcstatus, etc.) internally calls client.downloadMediaMessage(...), but
+// Baileys only exports downloadMediaMessage as a standalone function — it
+// never attaches it to the socket itself. Patch it on once here so every
+// .download() call in this file actually works instead of throwing
+// "client.downloadMediaMessage is not a function".
+if (!devtrust.downloadMediaMessage) devtrust.downloadMediaMessage = downloadMediaMessage;
+
 // Per-instance bot name — falls back to the default if not configured
 const botDisplayName = global.botConfig?.botName || process.env.BOT_NAME || "LËGĚNDÃRY BØT";
 
@@ -16242,27 +16250,27 @@ case 'vvgh': {
     if (!m.quoted) return reply('📸 *Reply to a view-once media*');
 
     try {
-        const mediaBuffer = await downloadMediaMessage(m.quoted, 'buffer', {});
-        if (!mediaBuffer) return reply('❌ *Download failed*');
+        // Confirmed via .vvdebug: m.quoted IS the raw proto media object
+        // itself (url/mediaKey/directPath/fileEncSha256/mimetype sit
+        // directly on it — there's no .message wrapper at all). The
+        // serializer's .download() incorrectly calls downloadMediaMessage
+        // (which expects a {key,message} WAMessage) instead of
+        // downloadContentFromMessage (which expects exactly this flattened
+        // shape) — so we call the correct one directly here.
+        const isImg = m.quoted.mtype === 'imageMessage';
+        const isVid = m.quoted.mtype === 'videoMessage';
+        const isAud = m.quoted.mtype === 'audioMessage';
 
-        // View-once messages arrive wrapped in a container type (e.g.
-        // viewOnceMessageV2), so m.quoted.mtype never actually equals
-        // 'imageMessage'/'videoMessage' directly — check the mimetype
-        // instead. Falls through several raw-message shapes in case the
-        // serializer's .msg/.mimetype shortcut comes back empty (this is
-        // what was silently failing on regular forwarded photos before).
-        const vvRaw = m.quoted.message || {};
-        const mime = (m.quoted.msg || m.quoted).mimetype
-            || vvRaw.imageMessage?.mimetype
-            || vvRaw.videoMessage?.mimetype
-            || vvRaw.audioMessage?.mimetype
-            || vvRaw.viewOnceMessage?.message?.imageMessage?.mimetype
-            || vvRaw.viewOnceMessage?.message?.videoMessage?.mimetype
-            || vvRaw.viewOnceMessageV2?.message?.imageMessage?.mimetype
-            || vvRaw.viewOnceMessageV2?.message?.videoMessage?.mimetype
-            || '';
+        if (!isImg && !isVid && !isAud) return reply('❌ *Unsupported or non view-once media*');
 
-        if (/image/.test(mime)) {
+        const vvDlType = isImg ? 'image' : isVid ? 'video' : 'audio';
+        const vvStream = await downloadContentFromMessage(m.quoted, vvDlType);
+        const vvChunks = [];
+        for await (const chunk of vvStream) vvChunks.push(chunk);
+        const mediaBuffer = Buffer.concat(vvChunks);
+        if (!mediaBuffer || !mediaBuffer.length) return reply('❌ *Download failed*');
+
+        if (isImg) {
             await devtrust.sendMessage(m.chat,
                 addNewsletterContext({
                     image: mediaBuffer,
@@ -16270,7 +16278,7 @@ case 'vvgh': {
                 }),
                 { quoted: m }
             );
-        } else if (/video/.test(mime)) {
+        } else if (isVid) {
             await devtrust.sendMessage(m.chat,
                 addNewsletterContext({
                     video: mediaBuffer,
@@ -16278,7 +16286,7 @@ case 'vvgh': {
                 }),
                 { quoted: m }
             );
-        } else if (/audio/.test(mime)) {
+        } else if (isAud) {
             await devtrust.sendMessage(m.chat,
                 addNewsletterContext({
                     audio: mediaBuffer,
@@ -16288,8 +16296,6 @@ case 'vvgh': {
                 }),
                 { quoted: m }
             );
-        } else {
-            reply('❌ *Unsupported or non view-once media*');
         }
     } catch (error) {
         console.error('Error:', error);
@@ -16303,41 +16309,50 @@ case 'readviewonce2': {
     if (!m.quoted) {
         return reply(`👁️ *${botDisplayName} View Once*\n\nReply to a view-once media with ${prefix}${command}`);
     }
-    
-    const vv2Raw = m.quoted.message || {};
-    let mime = (m.quoted.msg || m.quoted).mimetype
-        || vv2Raw.imageMessage?.mimetype
-        || vv2Raw.videoMessage?.mimetype
-        || vv2Raw.audioMessage?.mimetype
-        || vv2Raw.viewOnceMessage?.message?.imageMessage?.mimetype
-        || vv2Raw.viewOnceMessage?.message?.videoMessage?.mimetype
-        || vv2Raw.viewOnceMessageV2?.message?.imageMessage?.mimetype
-        || vv2Raw.viewOnceMessageV2?.message?.videoMessage?.mimetype
-        || '';
-    
+
+    // Use the serializer's own quoted.image/video/audio flags + .download(),
+    // same proven pattern as .vv / .gpp / .gcstatus, instead of manually
+    // rebuilding a WAMessage for downloadMediaMessage.
+    // Same fix as .vv — check mtype directly, not the .image/.video/.audio
+    // flags (deliberately false for view-once media on this serializer).
+    const isImg2 = m.quoted.mtype === 'imageMessage';
+    const isVid2 = m.quoted.mtype === 'videoMessage';
+    const isAud2 = m.quoted.mtype === 'audioMessage';
+
     try {
+        if (!isImg2 && !isVid2 && !isAud2) {
+            return reply(`❌ *${botDisplayName} View Once*\n\nUnsupported media type.`);
+        }
+
         await devtrust.sendMessage(m.chat, { react: { text: '👁️', key: m.key } });
-        
-        let media = await downloadMediaMessage(m.quoted, 'buffer', {});
+
+        // Same fix as .vv — m.quoted is the raw flattened proto media
+        // object, so use downloadContentFromMessage directly instead of
+        // the serializer's broken .download() helper.
+        const vv2DlType = isImg2 ? 'image' : isVid2 ? 'video' : 'audio';
+        const vv2Stream = await downloadContentFromMessage(m.quoted, vv2DlType);
+        const vv2Chunks = [];
+        for await (const chunk of vv2Stream) vv2Chunks.push(chunk);
+        let media = Buffer.concat(vv2Chunks);
         
         // Get bot's number - FIXED
         let botNumber = devtrust.user.id.split(':')[0] + '@s.whatsapp.net';
         
-        if (/image/.test(mime)) {
+        if (isImg2) {
             await devtrust.sendMessage(botNumber, {
                 image: media,
                 caption: `🔓 *View-Once Image*\nFrom: ${m.sender.split('@')[0]}`
             });
             reply(`✅ *${botDisplayName} View Once*\n\nImage saved to bot's DM.`);
             
-        } else if (/video/.test(mime)) {
+        } else if (isVid2) {
             await devtrust.sendMessage(botNumber, {
                 video: media,
                 caption: `🔓 *View-Once Video*\nFrom: ${m.sender.split('@')[0]}`
             });
             reply(`✅ *${botDisplayName} View Once*\n\nVideo saved to bot's DM.`);
             
-        } else if (/audio/.test(mime)) {
+        } else if (isAud2) {
             await devtrust.sendMessage(botNumber, {
                 audio: media,
                 mimetype: 'audio/mpeg',
